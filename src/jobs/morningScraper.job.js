@@ -1,43 +1,33 @@
 /**
  * morningScraper.job.js — Daily schedule fetcher (8 AM cron)
- *
- * Runs once per day at 8 AM.
- * Fetches today's game schedule for all active sports and stores in MongoDB.
- *
- * Why once per day?
- *  - Daily NBA schedules don't change after release
- *  - Avoids wasting API quota on redundant calls
- *  - The Prop Watcher handles individual game updates every 30 min
+ * After saving games to MongoDB, invalidates the Redis schedule cache
+ * so the frontend immediately sees fresh data on next request.
  */
 
-const cron = require('node-cron');
+const cron   = require('node-cron');
 const { Game } = require('../models/Game.model');
 const { getAdapter, getActiveSports } = require('../services/adapters/adapterRegistry');
+const { cacheDel } = require('../config/redis');
 const logger = require('../config/logger');
 
-/**
- * Main scraper function — can be called directly for testing.
- * @returns {Promise<{ sport: string, upserted: number, errors: number }[]>}
- */
 const runMorningScraper = async () => {
   logger.info('📅 [MorningScraper] Starting daily schedule scrape...');
 
   const activeSports = getActiveSports();
   const results = [];
+  const todayKey = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
 
   for (const sport of activeSports) {
     logger.info(`📅 [MorningScraper] Fetching schedule for: ${sport}`);
     let upserted = 0;
-    let errors = 0;
+    let errors   = 0;
 
     try {
       const adapter = getAdapter(sport);
-      const games = await adapter.fetchSchedule();
+      const games   = await adapter.fetchSchedule();
 
       for (const gameData of games) {
         try {
-          // Upsert: insert if new, update if already exists
-          // We use oddsEventId as the unique identifier
           await Game.findOneAndUpdate(
             { oddsEventId: gameData.oddsEventId },
             { $set: gameData },
@@ -47,15 +37,26 @@ const runMorningScraper = async () => {
         } catch (upsertErr) {
           errors++;
           logger.error(`[MorningScraper] Failed to upsert game`, {
-            sport,
-            oddsEventId: gameData.oddsEventId,
-            error: upsertErr.message,
+            sport, oddsEventId: gameData.oddsEventId, error: upsertErr.message,
           });
         }
       }
 
-      logger.info(`✅ [MorningScraper] ${sport} schedule done`, { upserted, errors, total: games.length });
+      // ── Invalidate Redis cache for all date keys this sport has games on ──
+      // Games span multiple days so we clear all relevant keys
+      const uniqueDates = [...new Set(games.map(g =>
+        new Date(g.startTime || g.commence_time).toISOString().split('T')[0]
+      ))];
+      for (const dateKey of uniqueDates) {
+        await cacheDel(`schedule:${sport}:${dateKey}`);
+      }
+      // Always clear today's key
+      await cacheDel(`schedule:${sport}:${todayKey}`);
+      logger.info(`🗑️  [MorningScraper] Cache invalidated for ${sport} (${uniqueDates.length} date keys)`);
+
+      logger.info(`✅ [MorningScraper] ${sport} done`, { upserted, errors, total: games.length });
       results.push({ sport, upserted, errors });
+
     } catch (err) {
       logger.error(`❌ [MorningScraper] Failed for sport: ${sport}`, { error: err.message });
       results.push({ sport, upserted: 0, errors: 1 });
@@ -66,28 +67,16 @@ const runMorningScraper = async () => {
   return results;
 };
 
-/**
- * Register the cron job.
- * Schedule: 8:00 AM every day (server local time).
- * Only runs if CRON_MORNING_SCRAPER_ENABLED=true in .env
- */
 const registerMorningScraperJob = () => {
   if (process.env.CRON_MORNING_SCRAPER_ENABLED !== 'true') {
-    logger.info('⏭️  [MorningScraper] Cron disabled via CRON_MORNING_SCRAPER_ENABLED=false');
+    logger.info('⏭️  [MorningScraper] Disabled via env');
     return;
   }
-
-  // Cron format: second minute hour day month weekday
-  // '0 8 * * *' = At 08:00 every day
   cron.schedule('0 8 * * *', async () => {
-    logger.info('⏰ [MorningScraper] Cron triggered — 8 AM daily scrape');
-    try {
-      await runMorningScraper();
-    } catch (err) {
-      logger.error('❌ [MorningScraper] Cron job crashed', { error: err.message });
-    }
+    logger.info('⏰ [MorningScraper] Cron triggered');
+    try { await runMorningScraper(); }
+    catch (err) { logger.error('❌ [MorningScraper] Cron crashed', { error: err.message }); }
   });
-
   logger.info('✅ [MorningScraper] Cron registered — runs daily at 8:00 AM');
 };
 

@@ -24,6 +24,7 @@ const { getAdapter, getActiveSports } = require('../services/adapters/adapterReg
 const { bulkResolvePlayerIds } = require('../utils/playerResolver');
 const { ODDS_CHANGE_THRESHOLD } = require('../config/constants');
 const logger = require('../config/logger');
+const { cacheDel } = require('../config/redis');
 
 /**
  * Main watcher function — can be called directly for testing.
@@ -50,21 +51,20 @@ const _watchPropsForSport = async (sport) => {
 
   // ── Fetch only active/upcoming games from MongoDB ──────────────────────────
   // This is the key optimization: we skip finished games entirely
-  const today = new Date();
-  const startOfDay = new Date(today);
-  startOfDay.setUTCHours(0, 0, 0, 0);
-
-  const endOfDay = new Date(today);
-  endOfDay.setUTCHours(23, 59, 59, 999);
+  // Fetch props for all upcoming games within 72h (same window as odds controller)
+  // This means tomorrow's games also get props fetched — users can unlock insights early
+  const now         = new Date();
+  const windowStart = new Date(now.getTime() - 3  * 60 * 60 * 1000); // 3h ago (covers live)
+  const windowEnd   = new Date(now.getTime() + 72 * 60 * 60 * 1000); // 72h ahead
 
   const activeGames = await Game.find({
     sport,
-    startTime: { $gte: startOfDay, $lte: endOfDay },
+    startTime: { $gte: windowStart, $lte: windowEnd },
     status: { $in: [GAME_STATUS.SCHEDULED, GAME_STATUS.LIVE] },
   }).lean();
 
   if (activeGames.length === 0) {
-    logger.info(`[PropWatcher] No active games for ${sport} today — skipping`);
+    logger.info(`[PropWatcher] No upcoming games for ${sport} in 72h window — skipping`);
     return;
   }
 
@@ -103,6 +103,24 @@ const _watchPropsForSport = async (sport) => {
   // ── Run Strategy Engine on all available props for this sport ──────────────
   // This scores each prop with confidence + edge + tags for the filter system
   await StrategyService.scoreAllPropsForSport(sport);
+
+  // Clear Redis cache for all affected date keys (games may span multiple days)
+  const uniqueDates = [...new Set(activeGames.map(g =>
+    new Date(g.startTime).toISOString().split('T')[0]
+  ))];
+  for (const dateKey of uniqueDates) {
+    await cacheDel(`schedule:${sport}:${dateKey}`);
+  }
+  // Also clear today's key always (for enriched game data with propCount)
+  const todayKey = new Date().toISOString().split('T')[0];
+  await cacheDel(`schedule:${sport}:${todayKey}`);
+
+  for (const game of activeGames) {
+    await cacheDel(`props:${sport}:${game.oddsEventId}:all`);
+    await cacheDel(`props:${sport}:${game.oddsEventId}:highConfidence`);
+    await cacheDel(`props:${sport}:${game.oddsEventId}:bestValue`);
+  }
+  logger.info(`🗑️  [PropWatcher] Cache cleared for ${sport} (${activeGames.length} games, ${uniqueDates.length} dates)`);
 };
 
 /**

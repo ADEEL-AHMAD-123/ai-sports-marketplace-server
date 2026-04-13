@@ -282,9 +282,8 @@ const _getCurrentSeason = (sport) => {
   // If current month is Oct–Dec, season is "year-(year+1)"
   // If current month is Jan–Jun, season is "(year-1)-year"
   if (sport === 'nba') {
-    return month >= 10
-      ? `${year}-${year + 1}`
-      : `${year - 1}-${year}`;
+    // API-Sports Basketball uses just the start year: 2025 = 2025-26 season
+    return month >= 10 ? String(year) : String(year - 1);
   }
 
   // Default: use current year

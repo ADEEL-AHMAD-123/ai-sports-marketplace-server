@@ -43,6 +43,7 @@ const gameSchema = new mongoose.Schema(
     // ID from The Odds API — used to fetch betting lines
     oddsEventId: {
       type: String,
+      index: true,
     },
 
     // ID from API-Sports — used to fetch player stats
@@ -53,15 +54,17 @@ const gameSchema = new mongoose.Schema(
 
     // ── Teams ─────────────────────────────────────────────────────────────────
     homeTeam: {
-      name: { type: String, required: true },
+      name:         { type: String, required: true },
       abbreviation: String,
-      logo: String, // URL to team logo image
+      apiSportsId:  Number, // API-Sports team ID — used for official logo URLs
+      logo:         String, // Fallback logo URL
     },
 
     awayTeam: {
-      name: { type: String, required: true },
+      name:         { type: String, required: true },
       abbreviation: String,
-      logo: String,
+      apiSportsId:  Number,
+      logo:         String,
     },
 
     // ── Game details ──────────────────────────────────────────────────────────

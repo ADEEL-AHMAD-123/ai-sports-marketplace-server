@@ -277,7 +277,7 @@ class InsightService {
     });
 
     const response = await openai.chat.completions.create({
-      model: process.env.OPENAI_MODEL || 'gpt-4-turbo-preview',
+      model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
       max_tokens: parseInt(process.env.OPENAI_MAX_TOKENS || '800', 10),
       temperature: parseFloat(process.env.OPENAI_TEMPERATURE || '0.3'),
       messages: [
@@ -345,7 +345,9 @@ class InsightService {
    * @returns {{ confidenceScore, edgePercentage, isHighConfidence, isBestValue }}
    */
   _calculateStrategyScores(processedStats, parsed, bettingLine) {
-    const { recentStatValues, focusStatAvg } = processedStats;
+    const { recentStatValues = [], focusStatAvg = 0 } = processedStats || {};
+    // Ensure focusStatAvg is a number — may be 'N/A' string if no stats available
+    const focusAvgNum = parseFloat(focusStatAvg) || 0;
 
     // Confidence: how often the player has exceeded the line recently
     const direction = parsed.recommendation || 'over';
@@ -359,8 +361,8 @@ class InsightService {
     }
 
     // Edge: how far the average is from the line
-    const edgePercentage = bettingLine > 0
-      ? parseFloat(((focusStatAvg - bettingLine) / bettingLine) * 100).toFixed(2)
+    const edgePercentage = bettingLine > 0 && focusAvgNum > 0
+      ? parseFloat(((focusAvgNum - bettingLine) / bettingLine) * 100).toFixed(2)
       : 0;
 
     // Tags for the filter system

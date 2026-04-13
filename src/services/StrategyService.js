@@ -46,31 +46,27 @@ class StrategyService {
 
       // Apply formulas to get processed stats (including recentStatValues)
       const processedStats = adapter.applyFormulas(stats, prop.statType);
-      const { recentStatValues, focusStatAvg } = processedStats;
+      // Guard: processedStats may be empty {} when no player stats available
+      const recentStatValues = processedStats?.recentStatValues || [];
+      const focusStatAvg     = parseFloat(processedStats?.focusStatAvg) || 0;
 
       // ── Confidence Score ────────────────────────────────────────────────────
-      // Direction: we analyze both directions and pick the one with more edge
-      // For a prop at line 25.5 with avg 28 → OVER has confidence
-      // For a prop at line 25.5 with avg 22 → UNDER has confidence
-      const overHits = (recentStatValues || []).filter((v) => v > prop.line).length;
-      const underHits = (recentStatValues || []).filter((v) => v < prop.line).length;
-      const totalGames = (recentStatValues || []).length || 1;
-
-      // Pick the direction with more historical hits
-      const bestHits = Math.max(overHits, underHits);
-      const confidenceScore = Math.round((bestHits / totalGames) * 100);
-
-      // ── Edge Percentage ─────────────────────────────────────────────────────
-      // Positive edge = player averages OVER the line (lean OVER)
-      // Negative edge = player averages UNDER the line (lean UNDER)
-      const edgePercentage = prop.line > 0
-        ? parseFloat(((focusStatAvg - prop.line) / prop.line) * 100)
+      const overHits  = recentStatValues.filter((v) => v > prop.line).length;
+      const underHits = recentStatValues.filter((v) => v < prop.line).length;
+      const totalGames = recentStatValues.length || 1;
+      const bestHits   = Math.max(overHits, underHits);
+      const confidenceScore = recentStatValues.length > 0
+        ? Math.round((bestHits / totalGames) * 100)
         : 0;
 
-      // ── AI-predicted value (we use recent average as our prediction) ────────
-      // This is the adapter-computed estimate before sending to OpenAI.
-      // In future phases this could be a more sophisticated model.
-      const aiPredictedValue = focusStatAvg;
+      // ── Edge Percentage ─────────────────────────────────────────────────────
+      // Returns 0 when no stats available — prop still stored, just unscored
+      const rawEdge = (prop.line > 0 && focusStatAvg > 0)
+        ? ((focusStatAvg - prop.line) / prop.line) * 100
+        : 0;
+      const edgePercentage = isNaN(rawEdge) ? 0 : parseFloat(rawEdge.toFixed(2));
+
+      const aiPredictedValue = focusStatAvg || null;
 
       // ── Tags ────────────────────────────────────────────────────────────────
       // isHighConfidence: player has hit this prop in 8/10 recent games

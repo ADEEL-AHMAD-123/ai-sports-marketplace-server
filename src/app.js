@@ -30,6 +30,7 @@ const authRoutes    = require('./routes/auth.routes');
 const oddsRoutes    = require('./routes/odds.routes');
 const insightRoutes = require('./routes/insight.routes');
 const creditRoutes  = require('./routes/credit.routes');
+const adminRoutes   = require('./routes/admin.routes');
 
 const app = express();
 
@@ -142,6 +143,7 @@ app.use('/api/auth',     authRoutes);
 app.use('/api/odds',     oddsRoutes);
 app.use('/api/insights', insightRoutes);
 app.use('/api/credits',  creditRoutes);
+app.use('/api/admin',    adminRoutes);
 
 // ─── 404 Handler ──────────────────────────────────────────────────────────────
 app.use(notFoundHandler);

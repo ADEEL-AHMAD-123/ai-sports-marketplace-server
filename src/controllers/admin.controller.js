@@ -68,7 +68,11 @@ const getPlatformStats = async (req, res, next) => {
       ]),
 
       PlayerProp.countDocuments({ isAvailable: true }),
-      Game.countDocuments({ status: 'scheduled' }),
+      // Count only upcoming games (within 72h window, same as odds controller)
+      Game.countDocuments({
+        status: { $in: ['scheduled', 'live'] },
+        startTime: { $gte: new Date(Date.now() - 3 * 60 * 60 * 1000) },
+      }),
     ]);
 
     res.status(HTTP_STATUS.OK).json({

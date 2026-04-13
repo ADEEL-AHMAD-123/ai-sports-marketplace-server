@@ -59,8 +59,9 @@ class NBAAdapter extends BaseAdapter {
     ];
 
     // ── API-Sports Basketball config ──────────────────────────────────────────
-    this.statsApiBase = process.env.API_SPORTS_BASE_URL;
-    this.statsApiKey = process.env.API_SPORTS_KEY;
+    // Default to v1 basketball API — set API_SPORTS_BASE_URL in .env to override
+    this.statsApiBase = process.env.API_SPORTS_BASE_URL || 'https://v1.basketball.api-sports.io';
+    this.statsApiKey  = process.env.API_SPORTS_KEY;
 
     // NBA league ID in API-Sports (12 = NBA)
     this.apiSportsLeagueId = 12;
@@ -116,12 +117,14 @@ class NBAAdapter extends BaseAdapter {
         {
           params: {
             apiKey: this.oddsApiKey,
+            // regions is REQUIRED by The Odds API — without it bookmakers array is empty
+            regions: 'us',
             // Fetch multiple prop markets in one call (comma-separated)
             markets: this.propMarkets.join(','),
-            // American odds format (-110, +110 style) — most common in US betting
+            // American odds format (-110, +110 style)
             oddsFormat: 'american',
-            // Include odds from multiple bookmakers for comparison
-            bookmakers: 'draftkings,fanduel,betmgm',
+            // Don't filter by bookmaker — let API return all available
+            // (filtering too early can cause empty results if those books don't have the market)
           },
           timeout: 10000,
         }
@@ -130,7 +133,19 @@ class NBAAdapter extends BaseAdapter {
       const eventData = response.data;
       if (!eventData) return [];
 
-      logger.info(`✅ [NBA] Fetched props for event: ${oddsEventId}`);
+      // ── Debug: log what came back so we can diagnose empty props ──────────
+      const bookmakerCount = eventData.bookmakers?.length || 0;
+      const firstMarkets   = eventData.bookmakers?.[0]?.markets?.map(m => m.key) || [];
+      logger.info(`✅ [NBA] Fetched props for event: ${oddsEventId}`, {
+        bookmakers: bookmakerCount,
+        firstBookmaker: eventData.bookmakers?.[0]?.title,
+        markets: firstMarkets,
+        rawOutcomeSample: eventData.bookmakers?.[0]?.markets?.[0]?.outcomes?.slice(0, 2),
+      });
+
+      if (bookmakerCount === 0) {
+        logger.warn(`⚠️  [NBA] No bookmakers returned for event ${oddsEventId} — check API plan supports player props`);
+      }
 
       // Log remaining API quota
       if (response.headers['x-requests-remaining']) {
@@ -189,7 +204,17 @@ class NBAAdapter extends BaseAdapter {
    * @param {string} params.season   - Season year (e.g., "2023-2024")
    * @returns {Promise<Object>} Raw player stats
    */
-  async fetchPlayerStats({ playerId, season = '2023-2024' }) {
+  async fetchPlayerStats({ playerId, season }) {
+    // Default to current season dynamically — avoids stale hardcoded value
+    if (!season) {
+      const now = new Date();
+      const year = now.getFullYear();
+      const month = now.getMonth() + 1; // 1-indexed
+      // API-Sports Basketball uses just the START year of the season
+      // NBA 2025-2026 season → season param = "2025"
+      // If before October, we're in the previous season's year
+      season = month >= 10 ? String(year) : String(year - 1);
+    }
     try {
       logger.info(`📈 [NBA] Fetching player stats`, { playerId, season });
 
@@ -200,13 +225,27 @@ class NBAAdapter extends BaseAdapter {
         params: {
           id: playerId,
           season,
-          league: this.apiSportsLeagueId,
+          // NOTE: /players/statistics in API-Sports Basketball does NOT accept
+          // a league param — it returns all stats for the player in that season
         },
         timeout: 10000,
       });
 
       const stats = response.data?.response || [];
-      logger.info(`✅ [NBA] Fetched stats for player ${playerId}: ${stats.length} game records`);
+
+      // Debug: log if API returns an error or empty (helps diagnose key/plan issues)
+      if (response.data?.errors && Object.keys(response.data.errors).length > 0) {
+        logger.warn(`⚠️  [NBA] API-Sports returned errors for player ${playerId}`, {
+          errors: response.data.errors,
+          season,
+        });
+      }
+
+      logger.info(`✅ [NBA] Fetched stats for player ${playerId}: ${stats.length} game records`, {
+        season,
+        resultsTotal: response.data?.results,
+        hasErrors: Object.keys(response.data?.errors || {}).length > 0,
+      });
 
       return stats;
     } catch (error) {
@@ -358,14 +397,26 @@ class NBAAdapter extends BaseAdapter {
    * @returns {string} Prompt string for OpenAI
    */
   buildPrompt({ processedStats, playerName, statType, bettingLine, marketType }) {
+    // Guard: processedStats may be empty if player stats unavailable
+    const stats = processedStats || {};
     const {
-      avgPoints, avgRebounds, avgAssists, avgThrees, avgMinutes,
-      trueShootingPct, effectiveFGPct, approxUSGPct,
-      recentStatValues, gamesAnalyzed, focusStatAvg,
-    } = processedStats;
+      avgPoints    = 'N/A',
+      avgRebounds  = 'N/A',
+      avgAssists   = 'N/A',
+      avgThrees    = 'N/A',
+      avgMinutes   = 'N/A',
+      trueShootingPct = 'N/A',
+      effectiveFGPct  = 'N/A',
+      approxUSGPct    = 'N/A',
+      recentStatValues = [],
+      gamesAnalyzed    = 0,
+      focusStatAvg     = 'N/A',
+    } = stats;
 
     // Format recent values as a readable list (e.g., "28, 31, 24, 29, 22")
-    const recentValuesStr = recentStatValues.join(', ');
+    const recentValuesStr = recentStatValues.length > 0
+      ? recentStatValues.join(', ')
+      : 'No recent game data available';
 
     const statLabel = {
       points: 'points',
@@ -421,16 +472,61 @@ Be concise and data-driven. Maximum 150 words.
       league: 'NBA',
       oddsEventId: rawGame.id,
       homeTeam: {
-        name: rawGame.home_team,
+        name:         rawGame.home_team,
         abbreviation: this._getTeamAbbreviation(rawGame.home_team),
+        apiSportsId:  this._getApiSportsTeamId(rawGame.home_team),
       },
       awayTeam: {
-        name: rawGame.away_team,
+        name:         rawGame.away_team,
         abbreviation: this._getTeamAbbreviation(rawGame.away_team),
+        apiSportsId:  this._getApiSportsTeamId(rawGame.away_team),
       },
       startTime: new Date(rawGame.commence_time),
       status: 'scheduled',
     };
+  }
+
+  /**
+   * Map full NBA team names to their API-Sports Basketball team IDs.
+   * IDs sourced from: https://v1.basketball.api-sports.io/teams?league=12&season=2024
+   *
+   * @param {string} teamName - Full team name from The Odds API
+   * @returns {number|null} API-Sports team ID
+   */
+  _getApiSportsTeamId(teamName) {
+    const teamIds = {
+      'Atlanta Hawks':          133,
+      'Boston Celtics':         134,
+      'Brooklyn Nets':          135,
+      'Charlotte Hornets':      136,
+      'Chicago Bulls':          137,
+      'Cleveland Cavaliers':    138,
+      'Dallas Mavericks':       139,
+      'Denver Nuggets':         140,
+      'Detroit Pistons':        141,
+      'Golden State Warriors':  142,
+      'Houston Rockets':        143,
+      'Indiana Pacers':         144,
+      'Los Angeles Clippers':   145,
+      'Los Angeles Lakers':     146,
+      'Memphis Grizzlies':      147,
+      'Miami Heat':             148,
+      'Milwaukee Bucks':        149,
+      'Minnesota Timberwolves': 150,
+      'New Orleans Pelicans':   151,
+      'New York Knicks':        152,
+      'Oklahoma City Thunder':  153,
+      'Orlando Magic':          154,
+      'Philadelphia 76ers':     155,
+      'Phoenix Suns':           156,
+      'Portland Trail Blazers': 157,
+      'Sacramento Kings':       158,
+      'San Antonio Spurs':      159,
+      'Toronto Raptors':        160,
+      'Utah Jazz':              161,
+      'Washington Wizards':     162,
+    };
+    return teamIds[teamName] || null;
   }
 
   /**
@@ -547,4 +643,4 @@ Be concise and data-driven. Maximum 150 words.
   }
 }
 
-module.exports = NBAAdapter; 
+module.exports = NBAAdapter;

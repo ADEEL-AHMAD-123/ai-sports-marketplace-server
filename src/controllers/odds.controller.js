@@ -10,7 +10,7 @@
  * Uses Redis HOT cache for fast responses.
  */
 
-const { Game } = require('../models/Game.model');
+const { Game, GAME_STATUS } = require('../models/Game.model');
 const PlayerProp = require('../models/PlayerProp.model');
 const { cacheGet, cacheSet } = require('../config/redis');
 const { SPORTS, SPORT_LABELS, ACTIVE_SPORTS, CACHE_TTL, CACHE_KEYS, HTTP_STATUS } = require('../config/constants');
@@ -53,34 +53,50 @@ const getGames = async (req, res, next) => {
       return res.status(HTTP_STATUS.OK).json({
         success: true,
         source: 'cache',
-        data: cached,
+        data: cached, // Already enriched when cached
       });
     }
 
     // ── Query MongoDB ──────────────────────────────────────────────────────
-    const today = new Date();
-    const startOfDay = new Date(today);
-    startOfDay.setUTCHours(0, 0, 0, 0);
-    const endOfDay = new Date(today);
-    endOfDay.setUTCHours(23, 59, 59, 999);
+    // Broad time window: 6h ago → 48h ahead (handles timezones & late games)
+    const now         = new Date();
+    const windowStart = new Date(now.getTime() - 3  * 60 * 60 * 1000); // 3h ago covers live games
+    const windowEnd   = new Date(now.getTime() + 72 * 60 * 60 * 1000); // 72h ahead = 3 days of schedule
 
-    const games = await Game.find({
+    let games = await Game.find({
       sport,
-      startTime: { $gte: startOfDay, $lte: endOfDay },
+      startTime: { $gte: windowStart, $lte: windowEnd },
+      status: { $in: [GAME_STATUS.SCHEDULED, GAME_STATUS.LIVE] },
     })
       .sort({ startTime: 1 })
       .select('-__v')
       .lean();
 
-    // Cache the result
-    await cacheSet(cacheKey, games, CACHE_TTL.SCHEDULE);
+    // Safety fallback: if status filter removes all games, query without it
+    if (games.length === 0) {
+      logger.warn(`[OddsController] No games with status filter for ${sport}, trying fallback...`);
+      games = await Game.find({
+        sport,
+        startTime: { $gte: windowStart, $lte: windowEnd },
+      })
+        .sort({ startTime: 1 })
+        .select('-__v')
+        .lean();
+      logger.info(`[OddsController] Fallback query found ${games.length} games for ${sport}`);
+    }
+
+    // Enrich games with live prop stats so frontend can show badges without extra calls
+    const enrichedGames = await _enrichGamesWithPropStats(games);
+
+    // Cache the enriched result
+    await cacheSet(cacheKey, enrichedGames, CACHE_TTL.SCHEDULE);
 
     logger.debug(`[OddsController] Games fetched from DB for ${sport}: ${games.length}`);
 
     res.status(HTTP_STATUS.OK).json({
       success: true,
       source: 'database',
-      data: games,
+      data: enrichedGames,
     });
   } catch (err) {
     next(err);
@@ -175,6 +191,59 @@ const _personalizeProps = (props, user) => {
  */
 const _getTodayKey = () => {
   return new Date().toISOString().split('T')[0];
+};
+
+// ─── Helpers ───────────────────────────────────────────────────────────────────
+
+/**
+ * Enrich game objects with prop statistics so frontend game cards
+ * can show confidence/edge badges without making extra API calls.
+ *
+ * Adds to each game:
+ *  - propCount:       number of available props for this game
+ *  - topConfidence:   highest confidence score across all props (integer %)
+ *  - topEdge:         highest edge % across all props (integer %)
+ */
+const _enrichGamesWithPropStats = async (games) => {
+  if (!games || games.length === 0) return games;
+
+  // Batch query — get all prop stats for all games in one DB call
+  const eventIds = games.map(g => g.oddsEventId);
+
+  const propStats = await PlayerProp.aggregate([
+    {
+      $match: {
+        oddsEventId: { $in: eventIds },
+        isAvailable: true,
+      },
+    },
+    {
+      $group: {
+        _id:           '$oddsEventId',
+        propCount:     { $sum: 1 },
+        topConfidence: { $max: '$confidenceScore' },
+        topEdge:       { $max: '$edgePercentage' },
+      },
+    },
+  ]);
+
+  // Build lookup map
+  const statsMap = {};
+  for (const stat of propStats) {
+    statsMap[stat._id] = {
+      propCount:     stat.propCount     || 0,
+      topConfidence: stat.topConfidence ? Math.round(stat.topConfidence) : null,
+      topEdge:       stat.topEdge       ? Math.round(stat.topEdge)       : null,
+    };
+  }
+
+  // Merge stats into game objects
+  return games.map(game => ({
+    ...game,
+    propCount:     statsMap[game.oddsEventId]?.propCount     || 0,
+    topConfidence: statsMap[game.oddsEventId]?.topConfidence || null,
+    topEdge:       statsMap[game.oddsEventId]?.topEdge       || null,
+  }));
 };
 
 module.exports = { getSports, getGames, getProps };
