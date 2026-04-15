@@ -182,4 +182,4 @@ const getTransactions = async (req, res, next) => {
   }
 };
 
-module.exports = { getBalance, getCreditPacks, createCheckout, stripeWebhook, getTransactions };
+module.exports = { getBalance, getCreditPacks, createCheckout, stripeWebhook, getTransactions }; 

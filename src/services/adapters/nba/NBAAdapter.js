@@ -10,7 +10,7 @@
  *
  * DATA SOURCES (NBA — finalized in Phase 1):
  *  Odds  → The Odds API  (https://the-odds-api.com)
- *  Stats → API-Sports Basketball (https://v1.basketball.api-sports.io)
+ *  Stats → API-Sports NBA v2 (https://v2.nba.api-sports.io)
  *
  * GLOSSARY (basketball betting terms):
  *  TS%  = True Shooting % — measures scoring efficiency including 3s and FTs
@@ -31,8 +31,9 @@
  */
 
 const BaseAdapter = require('../BaseAdapter');
-const axios = require('axios');
+const axios  = require('axios');
 const logger = require('../../../config/logger');
+const { FORM_WINDOW, EDGE_WINDOW, BASELINE_WINDOW, MIN_GAMES_REQUIRED } = require('../../../config/constants');
 
 class NBAAdapter extends BaseAdapter {
   constructor() {
@@ -58,10 +59,10 @@ class NBAAdapter extends BaseAdapter {
       'player_threes',
     ];
 
-    // ── API-Sports Basketball config ──────────────────────────────────────────
-    // Default to v1 basketball API — set API_SPORTS_BASE_URL in .env to override
-    this.statsApiBase = process.env.API_SPORTS_BASE_URL || 'https://v1.basketball.api-sports.io';
-    this.statsApiKey  = process.env.API_SPORTS_KEY;
+    // ── NBA API config ───────────────────────────────────────────────────────
+    // NBA integrations must use the dedicated API_NBA_* variables only.
+    this.statsApiBase = process.env.API_NBA_BASE_URL || 'https://v2.nba.api-sports.io';
+    this.statsApiKey  = process.env.API_NBA_KEY;
 
     // NBA league ID in API-Sports (12 = NBA)
     this.apiSportsLeagueId = 12;
@@ -196,55 +197,72 @@ class NBAAdapter extends BaseAdapter {
   }
 
   /**
-   * Fetch player statistics from API-Sports Basketball.
+    * Fetch player statistics from API-Sports NBA v2.
    * Returns season averages + recent games for the player.
    *
    * @param {Object} params
    * @param {number} params.playerId - API-Sports player ID
-   * @param {string} params.season   - Season year (e.g., "2023-2024")
+    * @param {number|string} params.season - Season start year (e.g., 2024)
    * @returns {Promise<Object>} Raw player stats
    */
   async fetchPlayerStats({ playerId, season }) {
-    // Default to current season dynamically — avoids stale hardcoded value
+    // Default to current season start year dynamically.
+    // NBA v2 expects an integer season year (e.g. 2024), not "2024-2025".
     if (!season) {
       const now = new Date();
       const year = now.getFullYear();
       const month = now.getMonth() + 1; // 1-indexed
-      // API-Sports Basketball uses just the START year of the season
-      // NBA 2025-2026 season → season param = "2025"
-      // If before October, we're in the previous season's year
-      season = month >= 10 ? String(year) : String(year - 1);
+      // NBA 2025-2026 season → season param = 2025
+      // If before October, we're in the previous season's start year.
+      season = month >= 10 ? year : year - 1;
     }
     try {
       logger.info(`📈 [NBA] Fetching player stats`, { playerId, season });
 
-      const response = await axios.get(`${this.statsApiBase}/players/statistics`, {
-        headers: {
-          'x-apisports-key': this.statsApiKey,
-        },
-        params: {
-          id: playerId,
-          season,
-          // NOTE: /players/statistics in API-Sports Basketball does NOT accept
-          // a league param — it returns all stats for the player in that season
-        },
-        timeout: 10000,
-      });
+      // ── Redis cache check ────────────────────────────────────────────────
+      // Player game logs don't change during the day (games are played at night)
+      // Cache for 6 hours — avoids duplicate API calls from PropWatcher + InsightService
+      const { cacheGet, cacheSet } = require('../../../config/redis');
+      const cacheKey = `playerstats:nba:${playerId}:${season}`;
+      const STATS_TTL = 6 * 60 * 60; // 6 hours in seconds
 
-      const stats = response.data?.response || [];
+      const cached = await cacheGet(cacheKey);
+      if (cached && cached.length > 0) {
+        logger.info(`⚡ [NBA] Player stats cache HIT for player ${playerId}: ${cached.length} records`);
+        return cached;
+      }
 
-      // Debug: log if API returns an error or empty (helps diagnose key/plan issues)
-      if (response.data?.errors && Object.keys(response.data.errors).length > 0) {
-        logger.warn(`⚠️  [NBA] API-Sports returned errors for player ${playerId}`, {
-          errors: response.data.errors,
-          season,
+      // ── Fetch from API-Sports NBA v2 ─────────────────────────────────────
+      const fetchStats = async (s) => {
+        const res = await axios.get(`${this.statsApiBase}/players/statistics`, {
+          headers: { 'x-apisports-key': this.statsApiKey },
+          params:  { id: playerId, season: s },
+          timeout: 10000,
         });
+        return res.data?.response || [];
+      };
+
+      let stats = await fetchStats(season);
+
+      // Free plan fallback to previous season
+      if (stats.length === 0) {
+        const seasonYear = parseInt(season, 10);
+        const prevSeason = seasonYear - 1;
+        logger.info(`[NBA] No stats for ${season}, trying previous season ${prevSeason}`);
+        stats = await fetchStats(prevSeason);
+        if (stats.length > 0) {
+          logger.info(`[NBA] Using previous season ${prevSeason} for player ${playerId}`);
+        }
+      }
+
+      // Cache result — only if we got data
+      if (stats.length > 0) {
+        await cacheSet(cacheKey, stats, STATS_TTL);
       }
 
       logger.info(`✅ [NBA] Fetched stats for player ${playerId}: ${stats.length} game records`, {
         season,
-        resultsTotal: response.data?.results,
-        hasErrors: Object.keys(response.data?.errors || {}).length > 0,
+        resultsTotal: stats.length,
       });
 
       return stats;
@@ -281,63 +299,135 @@ class NBAAdapter extends BaseAdapter {
    * @param {string} statType    - The stat to focus the analysis on
    * @returns {Object} Processed stats with advanced metrics
    */
+  /**
+   * Parse "MM:SS" string (e.g. "28:14") into decimal minutes (28.23)
+   * parseFloat("28:14") would give 28 — wrong. This gives 28.23.
+   */
+  _parseMinutes(minStr) {
+    if (!minStr) return 0;
+    const parts = String(minStr).split(':');
+    if (parts.length === 2) {
+      return parseInt(parts[0], 10) + parseInt(parts[1], 10) / 60;
+    }
+    return parseFloat(minStr) || 0;
+  }
+
   applyFormulas(rawStats, statType = 'points') {
     if (!rawStats || rawStats.length === 0) {
       logger.warn('[NBA] applyFormulas: no raw stats provided');
       return {};
     }
 
-    // Work with last 10 games for recent form analysis
-    const recentGames = rawStats.slice(-10);
-    const totalGames = recentGames.length;
+    // ── Three-window stat model ──────────────────────────────────────────────
+    //
+    // FORM_WINDOW (5):     confidence score + sparkline — "is player hot RIGHT NOW?"
+    // EDGE_WINDOW (10):    edge % + focusStatAvg — "reliable recent average"
+    // BASELINE_WINDOW (30): TS%/eFG%/USG% + AI context — "what book's line reflects"
+    //
+    // rawStats is ordered oldest→newest by API. slice(-N) = last N games played.
+    const formGames     = rawStats.slice(-FORM_WINDOW);      // last 5  → hot/cold signal
+    const edgeGames     = rawStats.slice(-EDGE_WINDOW);      // last 10 → edge calculation
+    const baselineGames = rawStats.slice(-BASELINE_WINDOW);  // last 30 → efficiency + AI
+    const totalGames    = formGames.length;
 
-    // ── Extract raw values from recent games ────────────────────────────────
-    const totals = recentGames.reduce(
+    const sumStats = (games) => games.reduce(
       (acc, game) => {
-        const g = game.game || {};
-        acc.points += game.points || 0;
-        acc.fgm += game.fgm || 0;
-        acc.fga += game.fga || 0;
-        acc.ftm += game.ftm || 0;
-        acc.fta += game.fta || 0;
-        acc.tpm += game.tpm || 0; // 3-pointers made
-        acc.tpa += game.tpa || 0; // 3-pointers attempted
-        acc.rebounds += game.totReb || 0;
-        acc.assists += game.assists || 0;
-        acc.turnovers += game.turnovers || 0;
-        acc.minutes += parseFloat(game.min) || 0;
+        acc.points    += game.points                     || 0;
+        acc.fgm       += game.field_goals?.total         || 0;
+        acc.fga       += game.field_goals?.attempts      || 0;
+        acc.ftm       += game.free_throws?.total         || 0;
+        acc.fta       += game.free_throws?.attempts      || 0;
+        acc.tpm       += game.threepoint_goals?.total    || 0;
+        acc.tpa       += game.threepoint_goals?.attempts || 0;
+        acc.rebounds  += game.rebounds?.total            || 0;
+        acc.assists   += game.assists                    || 0;
+        acc.turnovers += game.turnovers                  || 0;
+        acc.minutes   += this._parseMinutes(game.min);
         return acc;
       },
       { points: 0, fgm: 0, fga: 0, ftm: 0, fta: 0, tpm: 0, tpa: 0, rebounds: 0, assists: 0, turnovers: 0, minutes: 0 }
     );
 
-    // ── Compute averages ────────────────────────────────────────────────────
-    const avg = (val) => (totalGames > 0 ? parseFloat((val / totalGames).toFixed(1)) : 0);
+    const formTotals     = sumStats(formGames);      // last 5  — form signal
+    const edgeTotals     = sumStats(edgeGames);      // last 10 — edge calculation
+    const baselineTotals = sumStats(baselineGames);  // last 30 — baseline + efficiency
 
-    const avgPoints = avg(totals.points);
-    const avgRebounds = avg(totals.rebounds);
-    const avgAssists = avg(totals.assists);
-    const avgThrees = avg(totals.tpm);
-    const avgMinutes = avg(totals.minutes);
-    const avgFGA = avg(totals.fga);
-    const avgFTA = avg(totals.fta);
-    const avgTOV = avg(totals.turnovers);
+    // DEBUG — log raw field values from the last game to verify API field names
+    // Remove this after confirming data is correct
+    const lastGame = rawStats[rawStats.length - 1];
+    if (lastGame) {
+      logger.debug('[NBA] applyFormulas field check (last game raw)', {
+        statType,
+        points:    lastGame.points,
+        assists:   lastGame.assists,      // should be flat number e.g. 7
+        rebounds:  lastGame.rebounds,     // should be nested { total, offensive, defensive }
+        fga:       lastGame.field_goals?.attempts,
+        fgm:       lastGame.field_goals?.total,
+        fta:       lastGame.free_throws?.attempts,
+        tpm:       lastGame.threepoint_goals?.total,
+        min:       lastGame.min,
+        turnovers: lastGame.turnovers,
+        // Show if any unexpected nesting
+        rebTotal:  lastGame.rebounds?.total,
+        rawKeys:   Object.keys(lastGame).join(', '),
+      });
+    }
+
+    // recentGames = form window (5) — used for confidence hit-rate calculation
+    const recentGames = formGames;
+    // totals = edge window (10) — used for avgPoints/rebounds etc and efficiency metrics
+    const totals      = edgeTotals;
+
+    // ── Compute averages per window ──────────────────────────────────────────
+    const avgOf = (val, n) => (n > 0 ? parseFloat((val / n).toFixed(1)) : 0);
+
+    // FORM averages (last 5) — hot/cold signal, shown as sparkline in modal
+    const formCount   = formGames.length || 1;
+    const formPoints   = avgOf(formTotals.points,   formCount);
+    const formRebounds = avgOf(formTotals.rebounds,  formCount);
+    const formAssists  = avgOf(formTotals.assists,   formCount);
+    const formThrees   = avgOf(formTotals.tpm,       formCount);
+    const formMinutes  = avgOf(formTotals.minutes,   formCount);
+
+    // EDGE averages (last 10) — reliable recent average, drives edge %
+    const edgeCount    = edgeGames.length || 1;
+    const avgPoints    = avgOf(edgeTotals.points,   edgeCount);
+    const avgRebounds  = avgOf(edgeTotals.rebounds,  edgeCount);
+    const avgAssists   = avgOf(edgeTotals.assists,   edgeCount);
+    const avgThrees    = avgOf(edgeTotals.tpm,       edgeCount);
+    const avgMinutes   = avgOf(edgeTotals.minutes,   edgeCount);
+    const avgFGA       = avgOf(edgeTotals.fga,       edgeCount);
+    const avgFTA       = avgOf(edgeTotals.fta,       edgeCount);
+    const avgTOV       = avgOf(edgeTotals.turnovers, edgeCount);
+
+    // BASELINE averages (last 30) — what book priced the line against
+    const baselineCount    = baselineGames.length || 1;
+    const baselinePoints   = avgOf(baselineTotals.points,   baselineCount);
+    const baselineRebounds = avgOf(baselineTotals.rebounds,  baselineCount);
+    const baselineAssists  = avgOf(baselineTotals.assists,   baselineCount);
+    const baselineThrees   = avgOf(baselineTotals.tpm,       baselineCount);
+    const baselineMinutes  = avgOf(baselineTotals.minutes,   baselineCount);
 
     // ── True Shooting % (TS%) ─────────────────────────────────────────────
-    // Measures overall scoring efficiency (accounts for FT value and 3pt value)
-    // Higher is better. Elite players: 60%+. League average: ~56%
-    // Formula: PTS / (2 * (FGA + 0.44 * FTA))
-    const tsDenominator = 2 * (totals.fga + 0.44 * totals.fta);
-    const trueShootingPct = tsDenominator > 0
-      ? parseFloat(((totals.points / tsDenominator) * 100).toFixed(1))
+    // Formula: PTS / (2 * (FGA + 0.44 * FTA)) — capped at 100% (can't exceed)
+    // Uses BASELINE window (30 games) for statistical reliability
+    const bTotals      = baselineTotals; // use baseline for efficiency metrics
+    const tsDenominator = 2 * (bTotals.fga + 0.44 * bTotals.fta);
+    const tsRaw = tsDenominator > 0
+      ? (bTotals.points / tsDenominator) * 100
       : 0;
+    // Cap at 100 — any value above indicates data quality issue (missing FGA/FTA records)
+    const trueShootingPct = tsRaw > 100 || tsRaw <= 0
+      ? null  // null = don't show — bad data is worse than no data
+      : parseFloat(tsRaw.toFixed(1));
 
     // ── Effective Field Goal % (eFG%) ─────────────────────────────────────
-    // Like FG% but gives 3-pointers extra credit (they're worth 50% more)
-    // Formula: (FGM + 0.5 * 3PM) / FGA
-    const effectiveFGPct = totals.fga > 0
-      ? parseFloat((((totals.fgm + 0.5 * totals.tpm) / totals.fga) * 100).toFixed(1))
+    const efgRaw = bTotals.fga > 0
+      ? ((bTotals.fgm + 0.5 * bTotals.tpm) / bTotals.fga) * 100
       : 0;
+    const effectiveFGPct = efgRaw > 100 || efgRaw <= 0
+      ? null
+      : parseFloat(efgRaw.toFixed(1));
 
     // ── Usage Rate (USG%) ─────────────────────────────────────────────────
     // Approximation: % of team possessions ending with this player
@@ -348,23 +438,31 @@ class NBAAdapter extends BaseAdapter {
       : 0;
 
     // ── Recent values for the specific stat (for confidence scoring) ───────
-    const recentStatValues = recentGames.map((game) => {
-      const statMap = {
-        points: game.points || 0,
-        rebounds: game.totReb || 0,
-        assists: game.assists || 0,
-        threes: game.tpm || 0,
-      };
-      return statMap[statType] || 0;
-    });
+    // Map stat types to the new nested field structure
+    const recentStatValues = recentGames.map((game) => ({
+      points:   game.points                     || 0,
+      rebounds: game.rebounds?.total            || 0,
+      assists:  game.assists                    || 0,
+      threes:   game.threepoint_goals?.total    || 0,
+    }[statType] || 0));
 
     return {
       // Raw averages
+      // Recent form (last 5 games) — primary signal
       avgPoints,
       avgRebounds,
       avgAssists,
       avgThrees,
       avgMinutes,
+      // Season baseline (last 30 games) — context / what book's line is based on
+      baselinePoints,
+      baselineRebounds,
+      baselineAssists,
+      baselineThrees,
+      baselineMinutes,
+      // How many games in each group (may be less than window if season just started)
+      formGamesCount:     formCount,
+      baselineGamesCount: baselineCount,
 
       // Advanced metrics
       trueShootingPct,    // TS%
@@ -379,10 +477,19 @@ class NBAAdapter extends BaseAdapter {
 
       // The main stat being analyzed
       focusStat: statType,
-      focusStatAvg: statType === 'points' ? avgPoints
+      // focusStatAvg = recent form average for the stat being bet on
+      // This is what drives edge % — we compare recent form to the book's line
+      // Book's line ≈ baselineStat, so divergence = edge
+      focusStatAvg: statType === 'points'   ? avgPoints
         : statType === 'rebounds' ? avgRebounds
-        : statType === 'assists' ? avgAssists
+        : statType === 'assists'  ? avgAssists
         : avgThrees,
+
+      // baselineStatAvg = season average the bookmaker is pricing against
+      baselineStatAvg: statType === 'points'   ? baselinePoints
+        : statType === 'rebounds' ? baselineRebounds
+        : statType === 'assists'  ? baselineAssists
+        : baselineThrees,
     };
   }
 
@@ -397,65 +504,74 @@ class NBAAdapter extends BaseAdapter {
    * @returns {string} Prompt string for OpenAI
    */
   buildPrompt({ processedStats, playerName, statType, bettingLine, marketType }) {
-    // Guard: processedStats may be empty if player stats unavailable
     const stats = processedStats || {};
     const {
-      avgPoints    = 'N/A',
-      avgRebounds  = 'N/A',
-      avgAssists   = 'N/A',
-      avgThrees    = 'N/A',
-      avgMinutes   = 'N/A',
-      trueShootingPct = 'N/A',
-      effectiveFGPct  = 'N/A',
-      approxUSGPct    = 'N/A',
+      avgPoints = 'N/A', avgRebounds = 'N/A', avgAssists = 'N/A',
+      avgThrees = 'N/A', avgMinutes = 'N/A', focusStatAvg = 'N/A',
+      edgeGamesCount = 10,
+      formPoints = 'N/A', formRebounds = 'N/A', formAssists = 'N/A',
+      formThrees = 'N/A', formMinutes = 'N/A', formGamesCount = 5,
       recentStatValues = [],
-      gamesAnalyzed    = 0,
-      focusStatAvg     = 'N/A',
+      baselineStatAvg = 'N/A', baselineMinutes = 'N/A', baselineGamesCount = 30,
+      trueShootingPct = 'N/A', effectiveFGPct = 'N/A', approxUSGPct = 'N/A',
     } = stats;
 
-    // Format recent values as a readable list (e.g., "28, 31, 24, 29, 22")
-    const recentValuesStr = recentStatValues.length > 0
-      ? recentStatValues.join(', ')
-      : 'No recent game data available';
-
     const statLabel = {
-      points: 'points',
-      rebounds: 'total rebounds',
-      assists: 'assists',
-      threes: '3-pointers made',
+      points: 'points', rebounds: 'total rebounds',
+      assists: 'assists', threes: '3-pointers made',
     }[statType] || statType;
 
-    return `
-Analyze the following NBA player prop bet and give a clear recommendation.
+    const recentStr = recentStatValues.length > 0
+      ? recentStatValues.join(', ') : 'No recent data';
+
+    const formStat = {
+      points: formPoints, rebounds: formRebounds,
+      assists: formAssists, threes: formThrees,
+    }[statType] ?? 'N/A';
+
+    const edgeNum = parseFloat(focusStatAvg) || 0;
+    const lineNum = parseFloat(bettingLine)  || 0;
+    const dataSignal = edgeNum > 0 && lineNum > 0
+      ? (edgeNum > lineNum ? 'OVER' : 'UNDER')
+      : 'INSUFFICIENT_DATA';
+
+    return `You are an expert NBA prop betting analyst.
+
+Analyze this player prop and respond with ONLY a JSON object — no markdown, no explanation outside the JSON.
 
 PLAYER: ${playerName}
-PROP: ${statLabel.toUpperCase()}
-BETTING LINE: ${bettingLine} (Should we bet OVER or UNDER ${bettingLine} ${statLabel}?)
+STAT: ${statLabel}
+LINE: ${bettingLine}
+DATA SIGNAL: ${dataSignal} (based on 10-game avg of ${focusStatAvg} vs line of ${bettingLine})
 
-RECENT PERFORMANCE (Last ${gamesAnalyzed} games):
-- Average ${statLabel}: ${focusStatAvg} per game
-- Recent game-by-game ${statLabel}: ${recentValuesStr}
+THREE-WINDOW DATA:
+- CURRENT FORM (last ${formGamesCount} games): avg ${formStat}, minutes ${formMinutes}, game log: ${recentStr}
+- RECENT TREND (last ${edgeGamesCount} games): avg ${focusStatAvg}, minutes ${avgMinutes}
+- SEASON BASELINE (last ${baselineGamesCount} games): avg ${baselineStatAvg}, minutes ${baselineMinutes}
+- EFFICIENCY: TS% ${trueShootingPct != null ? trueShootingPct + '%' : 'N/A (insufficient shot data)'}, eFG% ${effectiveFGPct != null ? effectiveFGPct + '%' : 'N/A'}, USG% ${approxUSGPct}%
 
-SUPPORTING STATS (season averages):
-- Points per game: ${avgPoints}
-- Rebounds per game: ${avgRebounds}
-- Assists per game: ${avgAssists}
-- 3-Pointers made per game: ${avgThrees}
-- Minutes per game: ${avgMinutes}
+Return this exact JSON structure:
+{
+  "recommendation": "over" or "under",
+  "confidence": "low" or "medium" or "high",
+  "summary": "One sentence (max 25 words) stating the bet and the single most important reason",
+  "factors": [
+    "Factor 1 — cite the specific window and number (e.g. 10-game avg of 11.2 is well below line of 16.5)",
+    "Factor 2 — cite a different window or metric",
+    "Factor 3 — cite efficiency or minutes context"
+  ],
+  "risks": [
+    "Primary risk that could make this prediction wrong",
+    "Secondary risk (optional)"
+  ],
+  "dataQuality": "strong" or "moderate" or "weak"
+}
 
-ADVANCED EFFICIENCY METRICS:
-- True Shooting % (TS%): ${trueShootingPct}% [measures overall scoring efficiency; elite = 60%+]
-- Effective Field Goal % (eFG%): ${effectiveFGPct}% [adjusts for 3-pointers; above 52% is above average]
-- Approximate Usage Rate (USG%): ${approxUSGPct}% [how often team plays run through this player; high usage means more opportunities]
-
-TASK:
-1. Give a clear recommendation: OVER ${bettingLine} or UNDER ${bettingLine} ${statLabel}
-2. State your confidence level (Low / Medium / High)
-3. Provide 2–3 specific statistical reasons for your recommendation
-4. Note any key risk factors that could affect the outcome
-
-Be concise and data-driven. Maximum 150 words.
-`.trim();
+Rules:
+- recommendation MUST match the DATA SIGNAL unless you have strong reason to override — explain in summary if overriding
+- factors and risks must reference specific numbers from the data above
+- dataQuality is "weak" if any window has N/A or 0 values, "moderate" if partial data, "strong" if all three windows have real data
+- respond with ONLY the JSON — no backticks, no extra text`;
   }
 
   // ─── Normalization ─────────────────────────────────────────────────────────
@@ -488,7 +604,8 @@ Be concise and data-driven. Maximum 150 words.
 
   /**
    * Map full NBA team names to their API-Sports Basketball team IDs.
-   * IDs sourced from: https://v1.basketball.api-sports.io/teams?league=12&season=2024
+    * IDs are a static reference map used internally for team linkage.
+    * They are not fetched live from API endpoints at runtime.
    *
    * @param {string} teamName - Full team name from The Odds API
    * @returns {number|null} API-Sports team ID

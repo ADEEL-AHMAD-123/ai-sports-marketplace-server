@@ -63,13 +63,26 @@ playerCacheSchema.index({ oddsApiName: 1, sport: 1 }, { unique: true });
 const PlayerCache = mongoose.models.PlayerCache ||
   mongoose.model('PlayerCache', playerCacheSchema);
 
-// ─── Sport-specific API-Sports league IDs ─────────────────────────────────────
-// Used in search queries to narrow results to the correct league
-const LEAGUE_IDS = {
-  nba: 12,    // NBA
-  nfl: 1,     // NFL (API-Sports American Football)
-  mlb: 1,     // MLB (API-Sports Baseball)
-  nhl: 57,    // NHL (API-Sports Hockey)
+const NAME_SUFFIXES = new Set(['jr', 'sr', 'ii', 'iii', 'iv', 'v']);
+
+const PLAYER_ID_OVERRIDES = (() => {
+  try {
+    const raw = process.env.PLAYER_ID_OVERRIDES_JSON || '{}';
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch (err) {
+    logger.warn('[PlayerResolver] Invalid PLAYER_ID_OVERRIDES_JSON; expected JSON object');
+    return {};
+  }
+})();
+
+// Manual aliases for known provider naming quirks.
+// Keys are normalized odds names; values are extra search queries to try.
+const PLAYER_SEARCH_ALIASES = {
+  'wendell carter jr': ['wendell carter', 'carter'],
+  'derrick jones': ['derrick jones jr', 'jones'],
+  'kelly oubre jr': ['kelly oubre', 'oubre'],
+  'vj edgecombe': ['edgecombe', 'v edgecombe'],
 };
 
 /**
@@ -84,6 +97,26 @@ const resolvePlayerId = async (playerName, sport) => {
   if (!playerName || !sport) return null;
 
   const normalizedName = _normalizeName(playerName);
+
+  // Optional manual override for provider gaps or known naming mismatches.
+  // Example:
+  // PLAYER_ID_OVERRIDES_JSON={"tristan da silva":1234}
+  const overrideId = PLAYER_ID_OVERRIDES[normalizedName];
+  if (sport === 'nba' && Number.isInteger(overrideId) && overrideId > 0) {
+    await PlayerCache.findOneAndUpdate(
+      { oddsApiName: normalizedName, sport },
+      {
+        $set: {
+          apiSportsId: overrideId,
+          apiSportsName: `override:${playerName}`,
+          teamName: '',
+        },
+      },
+      { upsert: true, new: true }
+    );
+    logger.info(`[PlayerResolver] Using manual override for "${playerName}" → ${overrideId}`);
+    return overrideId;
+  }
 
   // ── Layer 1: Check MongoDB cache ─────────────────────────────────────────
   const cached = await PlayerCache.findOne({
@@ -140,41 +173,60 @@ const resolvePlayerId = async (playerName, sport) => {
  */
 const _searchApiSports = async (playerName, sport) => {
   try {
-    // NBA uses the Basketball API endpoint
-    // Other sports will use different base URLs — add them as sports are implemented
-    const baseUrls = {
-      nba: process.env.API_SPORTS_BASE_URL || 'https://v1.basketball.api-sports.io',
+    // Always use the single NBA API key and base URL from .env
+    // API_NBA_BASE_URL = https://v2.nba.api-sports.io
+    // API_NBA_KEY      = your key
+    // These are the only sport APIs configured right now.
+    const baseUrl = process.env.API_NBA_BASE_URL
+
+      || 'https://v2.nba.api-sports.io';
+
+    const apiKey = process.env.API_NBA_KEY;
+
+    if (!apiKey) {
+      logger.warn('[PlayerResolver] No API key found — set API_NBA_KEY in .env');
+      return null;
+    }
+
+    // NBA v2 player search is performed via `search` only.
+    // Keep lookup broad here and let name matching choose the best candidate.
+
+    const trySearch = async (nameParam) => {
+      const res = await axios.get(`${baseUrl}/players`, {
+        headers: { 'x-apisports-key': apiKey },
+        params: { search: nameParam },
+        timeout: 8000,
+      });
+
+      // Log the raw response for debugging if empty
+      const players = res.data?.response || [];
+      if (players.length === 0) {
+        logger.debug('[PlayerResolver] API returned 0 players', {
+          nameParam,
+          status:  res.status,
+          errors:  res.data?.errors,
+          results: res.data?.results,
+        });
+      }
+      return players;
     };
 
-    const baseUrl = baseUrls[sport];
-    if (!baseUrl) {
-      logger.warn(`[PlayerResolver] No API-Sports URL configured for sport: ${sport}`);
-      return null;
-    }
+    const queries = _buildSearchQueries(playerName);
 
-    const response = await axios.get(`${baseUrl}/players`, {
-      headers: { 'x-apisports-key': process.env.API_SPORTS_KEY },
-      params: {
-        search: playerName,
-        league: LEAGUE_IDS[sport],
-        season: _getCurrentSeason(sport),
-      },
-      timeout: 8000,
-    });
-
-    const players = response.data?.response || [];
-
-    if (players.length === 0) {
-      // Try again with just the last name (some APIs index by last name)
-      const lastName = playerName.split(' ').pop();
-      if (lastName !== playerName) {
-        return _searchApiSports(lastName, sport);
+    let players = [];
+    for (const query of queries) {
+      players = await trySearch(query);
+      if (players.length > 0) {
+        if (query !== playerName) {
+          logger.debug(`[PlayerResolver] Resolved using fallback query: "${query}"`, { playerName });
+        }
+        break;
       }
-      return null;
     }
+
+    if (players.length === 0) return null;
 
     // ── Pick best match ────────────────────────────────────────────────────
-    // If multiple results, pick the one whose name most closely matches
     const best = _findBestMatch(playerName, players);
     if (!best) return null;
 
@@ -203,47 +255,121 @@ const _searchApiSports = async (playerName, sport) => {
  * @returns {Object|null} Best matching player object
  */
 const _findBestMatch = (targetName, players) => {
-  const normalized = _normalizeName(targetName);
-  let bestScore = 0;
+  const normTarget   = _normalizeName(_stripNameSuffixes(targetName));
+  const targetParts  = normTarget.split(' ').filter(Boolean);
+  const targetFirst  = targetParts[0] || '';
+  const targetLast   = targetParts.slice(1).join(' ') || '';
+
+  let bestScore  = 0;
   let bestPlayer = null;
 
   for (const player of players) {
-    const fullName = _normalizeName(`${player.firstname} ${player.lastname}`);
-    const score = _similarityScore(normalized, fullName);
+    const normFirst = _normalizeName(player.firstname || '');
+    const normLast  = _normalizeName(_stripNameSuffixes(player.lastname || ''));
+    const fullName  = `${normFirst} ${normLast}`.trim();
+
+    // ── Scoring rules ───────────────────────────────────────────────────────
+    // Rule 1: Exact full name match → perfect score
+    if (fullName === normTarget) {
+      return player; // Can't do better — return immediately
+    }
+
+    // Rule 2: Last name must match closely — this is the hard gate.
+    // "Stephen Curry" vs "Seth Curry": last names both "curry" → pass gate
+    // "Draymond Green" vs "Danny Green": last names both "green" → pass gate
+    // But then first name decides — "draymond" vs "danny" → very different → reject
+    const lastSim = _stringSimilarity(targetLast, normLast);
+    if (lastSim < 0.75) continue; // Last name doesn't match closely enough — skip
+
+    // Rule 3: First name must match — this is the key fix.
+    // Previous code used character set overlap which let "seth" ≈ "stephen".
+    // Now we require the first name to START with the same characters or match closely.
+    const firstSim = _firstNameSimilarity(targetFirst, normFirst);
+
+    // Combined score: last name is critical (weight 0.4) but first name must also match (weight 0.6)
+    const score = (lastSim * 0.4) + (firstSim * 0.6);
 
     if (score > bestScore) {
-      bestScore = score;
+      bestScore  = score;
       bestPlayer = player;
     }
   }
 
-  // Only accept matches with >70% similarity to avoid wrong player IDs
-  return bestScore > 0.7 ? bestPlayer : null;
+  // Require a high overall score — both names must match well
+  if (bestScore >= 0.75) {
+    return bestPlayer;
+  }
+
+  // If no good match found, log it so we can debug
+  logger.debug('[PlayerResolver] No confident match found', {
+    targetName,
+    bestScore: bestScore.toFixed(2),
+    candidates: players.slice(0, 3).map(p => `${p.firstname} ${p.lastname}`),
+  });
+
+  return null;
 };
 
 /**
- * Simple similarity score between two strings (0–1).
- * Uses character overlap — good enough for name matching.
- *
- * @param {string} a
- * @param {string} b
- * @returns {number} 0 = no match, 1 = exact match
+ * First name similarity — stricter than general string similarity.
+ * Requires the first name to start with the same characters.
+ * "Stephen" vs "Seth": both start with "s" but diverge quickly → low score
+ * "Stephen" vs "Steph":  → high score (nickname match)
+ * "Draymond" vs "Danny": start with "d" but very different → low score
  */
-const _similarityScore = (a, b) => {
+const _firstNameSimilarity = (a, b) => {
+  if (!a || !b) return 0;
   if (a === b) return 1;
-  if (a.length === 0 || b.length === 0) return 0;
 
-  // Check if one contains the other (handles "PJ" vs "P.J.")
-  if (a.includes(b) || b.includes(a)) return 0.9;
+  // Handle initials and abbreviated first names from API (e.g. "V." vs "VJ")
+  if (a[0] === b[0] && (a.length <= 2 || b.length <= 2)) return 0.9;
 
-  // Count matching characters
-  const aChars = new Set(a.split(''));
-  const bChars = new Set(b.split(''));
-  const intersection = [...aChars].filter((c) => bChars.has(c)).length;
-  const union = new Set([...aChars, ...bChars]).size;
+  // Exact prefix match (handles nicknames): "steph" matches "stephen"
+  const shorter = a.length < b.length ? a : b;
+  const longer  = a.length < b.length ? b : a;
+  if (longer.startsWith(shorter) && shorter.length >= 3) return 0.92;
 
-  return intersection / union;
+  // Full string similarity for other cases
+  return _stringSimilarity(a, b);
 };
+
+/**
+ * String similarity using Dice coefficient (bigram overlap).
+ * More accurate than character set overlap — respects character order.
+ * "draymond" vs "danny": low bigram overlap → low score ✓
+ * "stephen" vs "seth":   low bigram overlap → low score ✓
+ * "stephen" vs "stephen": 1.0 ✓
+ */
+const _stringSimilarity = (a, b) => {
+  if (a === b) return 1;
+  if (!a || !b || a.length < 2 || b.length < 2) return 0;
+
+  // Build bigrams (pairs of adjacent characters)
+  const bigrams = (str) => {
+    const result = new Map();
+    for (let i = 0; i < str.length - 1; i++) {
+      const bg = str.slice(i, i + 2);
+      result.set(bg, (result.get(bg) || 0) + 1);
+    }
+    return result;
+  };
+
+  const aBigrams = bigrams(a);
+  const bBigrams = bigrams(b);
+
+  let intersection = 0;
+  for (const [bg, count] of aBigrams) {
+    intersection += Math.min(count, bBigrams.get(bg) || 0);
+  }
+
+  const totalA = a.length - 1;
+  const totalB = b.length - 1;
+
+  return (2 * intersection) / (totalA + totalB);
+};
+
+// Keep old _similarityScore as alias for any other uses
+const _similarityScore = _stringSimilarity;
 
 /**
  * Normalize a player name for consistent comparison.
@@ -266,28 +392,45 @@ const _normalizeName = (name) => {
 };
 
 /**
- * Get the current season string for API-Sports.
- * NBA seasons run October → June: "2024-2025"
- * Adjust per sport as needed.
+ * Remove suffix tokens like Jr/Sr/III from a name for matching/search fallback.
+ * Keeps core name stable across data providers that include or omit suffixes.
  *
- * @param {string} sport
+ * @param {string} name
  * @returns {string}
  */
-const _getCurrentSeason = (sport) => {
-  const now = new Date();
-  const year = now.getFullYear();
-  const month = now.getMonth() + 1; // 1-based
+const _stripNameSuffixes = (name) => {
+  const parts = _normalizeName(name).split(' ').filter(Boolean);
+  while (parts.length > 1 && NAME_SUFFIXES.has(parts[parts.length - 1])) {
+    parts.pop();
+  }
+  return parts.join(' ');
+};
 
-  // NBA season starts in October
-  // If current month is Oct–Dec, season is "year-(year+1)"
-  // If current month is Jan–Jun, season is "(year-1)-year"
-  if (sport === 'nba') {
-    // API-Sports Basketball uses just the start year: 2025 = 2025-26 season
-    return month >= 10 ? String(year) : String(year - 1);
+/**
+ * Build search variants for API-Sports v2 player lookup.
+ *
+ * @param {string} name
+ * @returns {string[]}
+ */
+const _buildSearchQueries = (name) => {
+  const original = String(name || '').trim();
+  const stripped = _stripNameSuffixes(original);
+  const normalized = _normalizeName(original);
+  const parts = stripped.split(' ').filter(Boolean);
+  const queries = new Set();
+
+  const aliases = PLAYER_SEARCH_ALIASES[normalized] || [];
+  for (const alias of aliases) queries.add(alias);
+
+  if (original) queries.add(original);
+  if (stripped) queries.add(stripped);
+
+  if (parts.length >= 2) {
+    queries.add(parts.slice(1).join(' '));   // full last-name segment (e.g. "da silva")
+    queries.add(parts[parts.length - 1]);    // final token fallback (e.g. "silva")
   }
 
-  // Default: use current year
-  return String(year);
+  return [...queries].filter(Boolean);
 };
 
 /**

@@ -43,7 +43,6 @@ const gameSchema = new mongoose.Schema(
     // ID from The Odds API — used to fetch betting lines
     oddsEventId: {
       type: String,
-      index: true,
     },
 
     // ID from API-Sports — used to fetch player stats

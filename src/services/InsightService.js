@@ -122,12 +122,23 @@ class InsightService {
       try {
         const adapter = getAdapter(sport);
         rawStats = await adapter.fetchPlayerStats({ playerId: resolvedPlayerId });
+
+        // Block insight if fewer than 10 games available — same threshold as PropCard filter
+        if (rawStats.length > 0 && rawStats.length < 10) {
+          logger.warn('[InsightService] Blocking insight — insufficient game data', {
+            ...logContext, gamesAvailable: rawStats.length,
+          });
+          return {
+            insight:        null,
+            creditDeducted: false,
+            error:          `Only ${rawStats.length} games available. Need at least 10 for a reliable insight.`,
+          };
+        }
       } catch (statsError) {
         logger.warn('[InsightService] Could not fetch player stats — proceeding with empty stats', {
           ...logContext,
           error: statsError.message,
         });
-        // Proceed with empty stats — AI can still give basic insight from the prompt context
       }
     }
 
@@ -184,6 +195,13 @@ class InsightService {
       marketType,
       bettingLine,
       recommendation: parsed.recommendation,
+      // Structured fields from JSON response — used directly by frontend
+      insightSummary:  parsed.summary     || '',
+      insightFactors:  parsed.factors     || [],
+      insightRisks:    parsed.risks       || [],
+      aiConfidenceLabel: parsed.confidence  || 'medium',
+      dataQuality:     parsed.dataQuality || 'moderate',
+      // Raw text kept as fallback
       insightText: aiResponse.text,
       confidenceScore,
       edgePercentage,
@@ -278,6 +296,7 @@ class InsightService {
 
     const response = await openai.chat.completions.create({
       model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
+      response_format: { type: 'json_object' }, // Force JSON output — no free text
       max_tokens: parseInt(process.env.OPENAI_MAX_TOKENS || '800', 10),
       temperature: parseFloat(process.env.OPENAI_TEMPERATURE || '0.3'),
       messages: [
@@ -319,19 +338,52 @@ class InsightService {
    * @param {string} text - Raw AI response text
    * @returns {{ recommendation: string|null }}
    */
+  /**
+   * Parse the AI JSON response.
+   * The prompt now asks for strict JSON — no regex needed.
+   * Falls back gracefully if AI returns malformed output.
+   */
   _parseAIResponse(text) {
     if (!text) return { recommendation: null };
 
-    const upperText = text.toUpperCase();
+    try {
+      // Strip any accidental backticks or markdown the AI might add
+      const clean = text
+        .replace(/```json\s*/gi, '')
+        .replace(/```\s*/g, '')
+        .trim();
 
-    // Look for explicit OVER or UNDER in the response
-    if (upperText.includes('OVER')) {
-      return { recommendation: 'over' };
-    } else if (upperText.includes('UNDER')) {
-      return { recommendation: 'under' };
+      const parsed = JSON.parse(clean);
+
+      // Validate recommendation field
+      const rec = parsed.recommendation?.toLowerCase();
+      if (rec !== 'over' && rec !== 'under') {
+        logger.warn('[InsightService] AI returned invalid recommendation:', rec);
+        return { recommendation: null };
+      }
+
+      return {
+        recommendation: rec,
+        confidence:     parsed.confidence  || 'medium',
+        summary:        parsed.summary     || '',
+        factors:        Array.isArray(parsed.factors) ? parsed.factors : [],
+        risks:          Array.isArray(parsed.risks)   ? parsed.risks   : [],
+        dataQuality:    parsed.dataQuality || 'moderate',
+      };
+    } catch (err) {
+      logger.warn('[InsightService] Failed to parse AI JSON response — falling back to text parse', {
+        error: err.message,
+        textPreview: text.slice(0, 100),
+      });
+
+      // Fallback: count OVER/UNDER occurrences (last resort)
+      const upper      = text.toUpperCase();
+      const overCount  = (upper.match(/\bOVER\b/g)  || []).length;
+      const underCount = (upper.match(/\bUNDER\b/g) || []).length;
+      const rec = overCount > underCount ? 'over' : underCount > overCount ? 'under' : null;
+
+      return { recommendation: rec, dataQuality: 'weak' };
     }
-
-    return { recommendation: null };
   }
 
   // ─── Strategy Score Calculation ───────────────────────────────────────────

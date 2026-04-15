@@ -22,6 +22,7 @@ const {
   MIN_CONFIDENCE_HITS,
   CONFIDENCE_WINDOW,
   MIN_EDGE_PERCENTAGE,
+  MIN_GAMES_REQUIRED,
 } = require('../config/constants');
 const logger = require('../config/logger');
 
@@ -44,37 +45,36 @@ class StrategyService {
     try {
       const adapter = getAdapter(prop.sport);
 
-      // Apply formulas to get processed stats (including recentStatValues)
       const processedStats = adapter.applyFormulas(stats, prop.statType);
-      // Guard: processedStats may be empty {} when no player stats available
-      const recentStatValues = processedStats?.recentStatValues || [];
-      const focusStatAvg     = parseFloat(processedStats?.focusStatAvg) || 0;
 
-      // ── Confidence Score ────────────────────────────────────────────────────
-      const overHits  = recentStatValues.filter((v) => v > prop.line).length;
-      const underHits = recentStatValues.filter((v) => v < prop.line).length;
+      // ── Confidence Score — uses FORM_WINDOW (last 5 games) ──────────────────
+      // "Is this player hitting this line RIGHT NOW?"
+      // recentStatValues maps to formGames (5 games) from NBAAdapter
+      const recentStatValues = processedStats?.recentStatValues || [];
+      const overHits   = recentStatValues.filter((v) => v > prop.line).length;
+      const underHits  = recentStatValues.filter((v) => v < prop.line).length;
       const totalGames = recentStatValues.length || 1;
       const bestHits   = Math.max(overHits, underHits);
       const confidenceScore = recentStatValues.length > 0
         ? Math.round((bestHits / totalGames) * 100)
         : 0;
 
-      // ── Edge Percentage ─────────────────────────────────────────────────────
-      // Returns 0 when no stats available — prop still stored, just unscored
-      const rawEdge = (prop.line > 0 && focusStatAvg > 0)
+      // ── Edge Percentage — uses EDGE_WINDOW (last 10 games) ──────────────────
+      // "How far is the player's reliable recent average from the line?"
+      // focusStatAvg is computed from edgeGames (10 games) in NBAAdapter
+      const focusStatAvg = parseFloat(processedStats?.focusStatAvg) || 0;
+      const rawEdge      = (prop.line > 0 && focusStatAvg > 0)
         ? ((focusStatAvg - prop.line) / prop.line) * 100
         : 0;
       const edgePercentage = isNaN(rawEdge) ? 0 : parseFloat(rawEdge.toFixed(2));
 
       const aiPredictedValue = focusStatAvg || null;
 
-      // ── Tags ────────────────────────────────────────────────────────────────
-      // isHighConfidence: player has hit this prop in 8/10 recent games
+      // ── Tags ─────────────────────────────────────────────────────────────────
+      // HC = hit line in 4/5 recent games (80%) — uses FORM_WINDOW
       const isHighConfidence = confidenceScore >= (MIN_CONFIDENCE_HITS / CONFIDENCE_WINDOW) * 100;
-
-      // isBestValue: the player's average deviates from the line by 15%+
-      // This suggests the bookmaker's line is potentially mispriced = "value bet"
-      const isBestValue = Math.abs(edgePercentage) >= MIN_EDGE_PERCENTAGE;
+      // BV = edge >= 15% — uses EDGE_WINDOW
+      const isBestValue      = Math.abs(edgePercentage) >= MIN_EDGE_PERCENTAGE;
 
       const scores = {
         confidenceScore,
@@ -135,6 +135,17 @@ class StrategyService {
 
         const adapter = getAdapter(sport);
         const stats = await adapter.fetchPlayerStats({ playerId: prop.apiSportsPlayerId });
+
+        // Hide prop if player has fewer than MIN_GAMES_REQUIRED games of data
+        if (stats.length < MIN_GAMES_REQUIRED) {
+          await PlayerProp.findByIdAndUpdate(prop._id, { isAvailable: false });
+          logger.info(`[StrategyService] Hiding prop — only ${stats.length} games available`, {
+            playerName: prop.playerName,
+            statType:   prop.statType,
+          });
+          continue;
+        }
+
         await this.scoreProp(prop, stats);
         scored++;
       } catch (err) {
