@@ -176,7 +176,8 @@ describe('NBAAdapter', () => {
       expect(prompt).toContain('25.5');
       expect(prompt).toContain('LeBron James');
       expect(prompt).toContain('OVER');
-      expect(prompt).toContain('UNDER');
+      expect(prompt).toContain('"recommendation":"over"|"under"');
+      expect(prompt).toContain('DATA FLAGS:');
     });
 
     it('should include advanced metrics in the prompt', () => {
@@ -194,7 +195,7 @@ describe('NBAAdapter', () => {
 
       expect(prompt).toContain('TS%');
       expect(prompt).toContain('eFG%');
-      expect(prompt).toContain('Usage Rate');
+      expect(prompt).toContain('USG%');
     });
   });
 });

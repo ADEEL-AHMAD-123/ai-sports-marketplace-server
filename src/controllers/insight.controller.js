@@ -91,16 +91,32 @@ const unlockInsight = async (req, res, next) => {
 
     // Pre-flight check failed (odds changed or market closed)
     if (result.preflightFailed) {
+      const requestedLine = parseFloat(bettingLine);
+      const currentLine = typeof result.currentLine === 'number' ? result.currentLine : null;
       return res.status(HTTP_STATUS.CONFLICT).json({
         success: false,
         message: result.reason || 'Odds have changed. Please refresh and try again.',
         preflightFailed: true,
         creditDeducted: false,
+        currentLine,
+        requestedLine: Number.isFinite(requestedLine) ? requestedLine : null,
+        lineDelta: currentLine != null && Number.isFinite(requestedLine)
+          ? parseFloat((currentLine - requestedLine).toFixed(2))
+          : null,
       });
     }
 
     // AI or data fetch failed
     if (!result.insight) {
+      if (result.injuryInfo?.skip) {
+        return res.status(HTTP_STATUS.UNPROCESSABLE).json({
+          success: false,
+          message: result.error || 'Insight not generated due to player injury status.',
+          creditDeducted: false,
+          injuryInfo: result.injuryInfo,
+        });
+      }
+
       throw new AppError(
         result.error || 'Failed to generate insight. Please try again.',
         HTTP_STATUS.INTERNAL_ERROR
@@ -206,4 +222,58 @@ const listInsights = async (req, res, next) => {
   }
 };
 
-module.exports = { unlockInsight, getInsight, listInsights };
+// ─── List current user's unlocked insight history ───────────────────────────
+
+/**
+ * GET /api/insights/my-history?filter=highConfidence&page=1&limit=20
+ *
+ * Returns only insights unlocked by the current user.
+ */
+const listMyHistory = async (req, res, next) => {
+  try {
+    const {
+      filter,
+      page = 1,
+      limit = 20,
+    } = req.query;
+
+    const unlockedIds = req.user.unlockedInsights || [];
+
+    const query = {
+      _id: { $in: unlockedIds },
+      status: INSIGHT_STATUS.GENERATED,
+    };
+
+    if (filter === 'highConfidence') query.isHighConfidence = true;
+    if (filter === 'bestValue') query.isBestValue = true;
+
+    const pageNum = parseInt(page, 10);
+    const limitNum = parseInt(limit, 10);
+    const skip = (pageNum - 1) * limitNum;
+
+    const [insights, total] = await Promise.all([
+      Insight.find(query)
+        .select('-aiLog')
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limitNum)
+        .lean(),
+      Insight.countDocuments(query),
+    ]);
+
+    res.status(HTTP_STATUS.OK).json({
+      success: true,
+      data: insights,
+      pagination: {
+        total,
+        page: pageNum,
+        pages: Math.ceil(total / limitNum),
+        limit: limitNum,
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+module.exports = { unlockInsight, getInsight, listInsights, listMyHistory };

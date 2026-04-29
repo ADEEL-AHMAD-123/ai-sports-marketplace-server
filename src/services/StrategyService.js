@@ -1,147 +1,126 @@
 /**
- * StrategyService.js — Strategy Engine
+ * StrategyService.js — Prop scoring engine
  *
- * Calculates advanced betting metrics and tags props for the filter system.
- * Called by the Prop Watcher cron job every 30 minutes.
+ * Runs after every PropWatcher cycle. Outputs confidence scores and edge
+ * percentages stored directly on each PlayerProp document in MongoDB.
  *
- * Outputs:
- *  confidenceScore  — how often the player has hit this prop recently
- *  edgePercentage   — how much the player's average differs from the line
- *  isHighConfidence — tagged if confidenceScore is above threshold
- *  isBestValue      — tagged if edgePercentage is above threshold
+ * DATA SOURCES:
+ *  NBA → API-Sports NBA v2 game logs (requires apiSportsPlayerId on prop)
+ *  MLB → Official MLB Stats API (statsapi.mlb.com, lookup by playerName)
  *
- * BETTING GLOSSARY:
- *  "Sharp money"  = bets from professional/winning bettors (opposite of "public money")
- *  "Line value"   = when the line is mispriced relative to the true probability
- *  "Hit rate"     = how often a player exceeds/falls below a line historically
+ * CONFIDENCE FORMULA (game log available):
+ *  Weighted hit rate over the form window (last 5-8 games).
+ *  Margins are LINE-SCALED so small lines (e.g. 0.5 hits) score fairly:
+ *    strongMargin = min(2.0, line)       → for 0.5 line: 0.5 unit = strong
+ *    normalMargin = min(0.5, line × 0.5) → for 0.5 line: 0.25 unit = normal
+ *  Hit weights:  >= strongMargin → 1.4 | >= normalMargin → 1.0 | > 0 → 0.7 | miss → 0
+ *  Score = sum(weights) / (n × 1.4) × 100, capped at 100
+ *
+ * CONFIDENCE FALLBACK (no game log):
+ *  Estimated from edge magnitude:
+ *  |edge| >= 20% → 80 | >= 12% → 65 | >= 6% → 50 | < 6% → 30
+ *
+ * EDGE FORMULA:
+ *  (focusStatAvg - line) / line × 100
+ *  Positive → OVER signal | Negative → UNDER signal
+ *
+ * TAGS:
+ *  isHighConfidence = confidenceScore >= 57
+ *  isBestValue      = |edgePercentage| >= MIN_EDGE_PERCENTAGE (15%)
  */
 
 const PlayerProp = require('../models/PlayerProp.model');
 const { getAdapter } = require('./adapters/adapterRegistry');
-const {
-  MIN_CONFIDENCE_HITS,
-  CONFIDENCE_WINDOW,
-  MIN_EDGE_PERCENTAGE,
-  MIN_GAMES_REQUIRED,
-} = require('../config/constants');
+const { MIN_EDGE_PERCENTAGE, MIN_GAMES_REQUIRED } = require('../config/constants');
 const logger = require('../config/logger');
 
+const HC_THRESHOLD = 57;
+
 class StrategyService {
-  /**
-   * Run the strategy engine on a specific player prop.
-   * Calculates scores and updates the prop in MongoDB.
-   *
-   * @param {Object} prop   - PlayerProp document (lean object)
-   * @param {Array}  stats  - Recent player stats array (from adapter.fetchPlayerStats)
-   * @returns {Promise<Object>} Updated strategy scores
-   */
+
+  // ─── Score a single prop ───────────────────────────────────────────────────
+
   async scoreProp(prop, stats) {
-    logger.debug('📊 [StrategyService] Scoring prop', {
-      playerName: prop.playerName,
-      statType: prop.statType,
-      line: prop.line,
-    });
-
     try {
-      const adapter = getAdapter(prop.sport);
-
-      const processedStats = adapter.applyFormulas(stats, prop.statType);
-
-      // ── Confidence Score — uses FORM_WINDOW (last 5 games) ──────────────────
-      // "Is this player hitting this line RIGHT NOW?"
-      // recentStatValues maps to formGames (5 games) from NBAAdapter
-      const recentStatValues = processedStats?.recentStatValues || [];
-      const overHits   = recentStatValues.filter((v) => v > prop.line).length;
-      const underHits  = recentStatValues.filter((v) => v < prop.line).length;
-      const totalGames = recentStatValues.length || 1;
-      const bestHits   = Math.max(overHits, underHits);
-      const confidenceScore = recentStatValues.length > 0
-        ? Math.round((bestHits / totalGames) * 100)
-        : 0;
-
-      // ── Edge Percentage — uses EDGE_WINDOW (last 10 games) ──────────────────
-      // "How far is the player's reliable recent average from the line?"
-      // focusStatAvg is computed from edgeGames (10 games) in NBAAdapter
-      const focusStatAvg = parseFloat(processedStats?.focusStatAvg) || 0;
-      const rawEdge      = (prop.line > 0 && focusStatAvg > 0)
-        ? ((focusStatAvg - prop.line) / prop.line) * 100
-        : 0;
-      const edgePercentage = isNaN(rawEdge) ? 0 : parseFloat(rawEdge.toFixed(2));
-
-      const aiPredictedValue = focusStatAvg || null;
-
-      // ── Tags ─────────────────────────────────────────────────────────────────
-      // HC = hit line in 4/5 recent games (80%) — uses FORM_WINDOW
-      const isHighConfidence = confidenceScore >= (MIN_CONFIDENCE_HITS / CONFIDENCE_WINDOW) * 100;
-      // BV = edge >= 15% — uses EDGE_WINDOW
-      const isBestValue      = Math.abs(edgePercentage) >= MIN_EDGE_PERCENTAGE;
-
-      const scores = {
-        confidenceScore,
-        edgePercentage: parseFloat(edgePercentage.toFixed(2)),
-        aiPredictedValue,
-        isHighConfidence,
-        isBestValue,
-      };
-
-      // Update the prop in MongoDB with the new scores
+      const adapter        = getAdapter(prop.sport);
+      const processedStats = adapter.applyFormulas(
+        stats,
+        prop.statType,
+        { isPitcher: prop.isPitcher || prop.statType === 'pitcher_strikeouts' }
+      );
+      const scores = this._computeScores(processedStats, prop.line);
       await PlayerProp.findByIdAndUpdate(prop._id, scores);
 
-      logger.debug('✅ [StrategyService] Prop scored', {
+      logger.debug('✅ [StrategyService] Scored', {
         playerName: prop.playerName,
-        statType: prop.statType,
-        line: prop.line,
+        statType:   prop.statType,
+        line:       prop.line,
         ...scores,
       });
 
       return scores;
-    } catch (error) {
-      logger.error('❌ [StrategyService] Failed to score prop', {
-        propId: prop._id,
+    } catch (err) {
+      logger.error('❌ [StrategyService] scoreProp failed', {
+        propId:     prop._id,
         playerName: prop.playerName,
-        error: error.message,
+        error:      err.message,
       });
       return null;
     }
   }
 
-  /**
-   * Score all available props for a given sport.
-   * Called by the Prop Watcher cron job.
-   *
-   * @param {string} sport
-   * @returns {Promise<{ scored: number, failed: number }>}
-   */
+  // ─── Score all props for a sport ──────────────────────────────────────────
+
   async scoreAllPropsForSport(sport) {
     logger.info(`📊 [StrategyService] Scoring all props for ${sport}...`);
 
-    // Only score available props (market is still open)
     const props = await PlayerProp.find({ sport, isAvailable: true }).lean();
-
     logger.info(`📊 [StrategyService] Found ${props.length} props to score for ${sport}`);
 
-    let scored = 0;
-    let failed = 0;
+    let scored  = 0;
+    let failed  = 0;
+    let noStats = 0;
 
     for (const prop of props) {
       try {
-        if (!prop.apiSportsPlayerId) {
-          logger.debug('[StrategyService] Skipping prop — no apiSportsPlayerId', {
+        const adapter = getAdapter(sport);
+        let stats     = null;
+
+        if (sport === 'mlb') {
+          stats = await adapter.fetchPlayerStats({
             playerName: prop.playerName,
-            statType: prop.statType,
+            isPitcher:  prop.isPitcher || prop.statType === 'pitcher_strikeouts',
           });
+        } else if (prop.apiSportsPlayerId) {
+          stats = await adapter.fetchPlayerStats({ playerId: prop.apiSportsPlayerId });
+        }
+
+        if (!stats?.length) {
+          // FIX A: use aiPredictedValue OR focusStatAvg — on first run aiPredictedValue is null
+          const fallbackAvg = prop.aiPredictedValue ?? prop.focusStatAvg ?? null;
+          const edgeScores  = this._computeEdgeOnlyScores(prop.line, fallbackAvg);
+
+          if (edgeScores) {
+            await PlayerProp.findByIdAndUpdate(prop._id, edgeScores);
+          } else {
+            // No stats AND no avg to estimate from — hide prop
+            await PlayerProp.findByIdAndUpdate(prop._id, { isAvailable: false });
+            logger.debug('[StrategyService] Hidden — no stats, no fallback signal', {
+              playerName: prop.playerName, statType: prop.statType,
+            });
+          }
+          noStats++;
           continue;
         }
 
-        const adapter = getAdapter(sport);
-        const stats = await adapter.fetchPlayerStats({ playerId: prop.apiSportsPlayerId });
+        // Pitchers start every ~5 days — require fewer games than batters
+        const isPitcherProp = prop.statType === 'pitcher_strikeouts' || prop.isPitcher;
+        const minGames      = isPitcherProp ? 3 : MIN_GAMES_REQUIRED;
 
-        // Hide prop if player has fewer than MIN_GAMES_REQUIRED games of data
-        if (stats.length < MIN_GAMES_REQUIRED) {
+        if (stats.length < minGames) {
           await PlayerProp.findByIdAndUpdate(prop._id, { isAvailable: false });
-          logger.info(`[StrategyService] Hiding prop — only ${stats.length} games available`, {
+          logger.info(`[StrategyService] Hidden — only ${stats.length} games (need ${minGames})`, {
             playerName: prop.playerName,
-            statType:   prop.statType,
           });
           continue;
         }
@@ -152,14 +131,93 @@ class StrategyService {
         failed++;
         logger.error('[StrategyService] Failed to score prop', {
           playerName: prop.playerName,
-          error: err.message,
+          statType:   prop.statType,
+          error:      err.message,
         });
       }
     }
 
-    logger.info(`✅ [StrategyService] Scoring complete for ${sport}`, { scored, failed });
+    logger.info(`✅ [StrategyService] Scoring complete for ${sport}`, { scored, failed, noStats });
     return { scored, failed };
+  }
+
+  // ─── Score computation (public so InsightService can call it) ─────────────
+
+  /**
+   * Compute all scores from processedStats + bettingLine.
+   * Called by both scoreProp() and InsightService._calculateStrategyScores().
+   *
+   * @param {Object} processedStats - Output of adapter.applyFormulas()
+   * @param {number} bettingLine
+   * @returns {{ confidenceScore, edgePercentage, aiPredictedValue, isHighConfidence, isBestValue }}
+   */
+  computeScores(processedStats, bettingLine) {
+    return this._computeScores(processedStats, bettingLine);
+  }
+
+  _computeScores(processedStats, bettingLine) {
+    const { recentStatValues = [], focusStatAvg = 0 } = processedStats || {};
+    const focusAvgNum = parseFloat(focusStatAvg) || 0;
+
+    // Edge percentage
+    const rawEdge = bettingLine > 0 && focusAvgNum > 0
+      ? ((focusAvgNum - bettingLine) / bettingLine) * 100
+      : 0;
+    const edgePercentage = isNaN(rawEdge) ? 0 : parseFloat(rawEdge.toFixed(2));
+    const absEdge        = Math.abs(edgePercentage);
+
+    // Confidence score
+    let confidenceScore;
+    if (recentStatValues.length > 0) {
+      const direction    = focusAvgNum >= bettingLine ? 'over' : 'under';
+      const total        = recentStatValues.length;
+      const maxWeight    = 1.4;
+      // Line-scaled margins — small lines (0.5 hits) scored as fairly as large lines (25 pts)
+      const strongMargin = Math.min(2.0, bettingLine);
+      const normalMargin = Math.min(0.5, bettingLine * 0.5);
+      const weightedHits = recentStatValues.reduce((sum, val) => {
+        const margin = direction === 'over' ? val - bettingLine : bettingLine - val;
+        if (margin <= 0) return sum;
+        return sum + (margin >= strongMargin ? 1.4 : margin >= normalMargin ? 1.0 : 0.7);
+      }, 0);
+      // Cap at 99 — 100 implies impossible certainty and breaks the arc UI
+      confidenceScore = Math.min(99, Math.round((weightedHits / (total * maxWeight)) * 100));
+    } else {
+      confidenceScore = this._edgeToConfidence(absEdge);
+    }
+
+    return {
+      confidenceScore,
+      edgePercentage,
+      aiPredictedValue: focusAvgNum || null,
+      isHighConfidence:  confidenceScore >= HC_THRESHOLD,
+      isBestValue:       absEdge >= MIN_EDGE_PERCENTAGE,
+    };
+  }
+
+  _computeEdgeOnlyScores(bettingLine, focusStatAvg) {
+    const avg = parseFloat(focusStatAvg) || 0;
+    if (!avg || !bettingLine) return null;
+
+    const rawEdge        = ((avg - bettingLine) / bettingLine) * 100;
+    const edgePercentage = parseFloat(rawEdge.toFixed(2));
+    const absEdge        = Math.abs(edgePercentage);
+    const confidenceScore = this._edgeToConfidence(absEdge);
+
+    return {
+      edgePercentage,
+      confidenceScore,
+      isHighConfidence: confidenceScore >= HC_THRESHOLD,
+      isBestValue:      absEdge >= MIN_EDGE_PERCENTAGE,
+    };
+  }
+
+  _edgeToConfidence(absEdge) {
+    if (absEdge >= 20) return 80;
+    if (absEdge >= 12) return 65;
+    if (absEdge >= 6)  return 50;
+    return 30;
   }
 }
 
-module.exports = new StrategyService(); // Singleton
+module.exports = new StrategyService();

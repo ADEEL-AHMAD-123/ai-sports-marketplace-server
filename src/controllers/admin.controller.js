@@ -20,9 +20,28 @@ const Insight = require('../models/Insight.model');
 const Transaction = require('../models/Transaction.model');
 const PlayerProp = require('../models/PlayerProp.model');
 const { Game } = require('../models/Game.model');
+const InsightOutcomeService = require('../services/InsightOutcomeService');
+const { PlayerCache } = require('../utils/playerResolver');
 const { HTTP_STATUS, USER_ROLES, TRANSACTION_TYPES, INSIGHT_STATUS } = require('../config/constants');
 const { AppError } = require('../middleware/errorHandler.middleware');
 const logger = require('../config/logger');
+
+const normalizePlayerCacheName = (value = '') => String(value)
+  .toLowerCase()
+  .replace(/['.]/g, '')
+  .replace(/\s+/g, ' ')
+  .trim();
+
+const parsePlayerIdOverrides = () => {
+  try {
+    const raw = JSON.parse(process.env.PLAYER_ID_OVERRIDES_JSON || '{}');
+    return Object.fromEntries(
+      Object.entries(raw).map(([name, bySport]) => [normalizePlayerCacheName(name), bySport])
+    );
+  } catch {
+    return {};
+  }
+};
 
 // ─── Platform Stats ────────────────────────────────────────────────────────────
 
@@ -36,6 +55,10 @@ const getPlatformStats = async (req, res, next) => {
     const startOfToday = new Date(now);
     startOfToday.setUTCHours(0, 0, 0, 0);
 
+    const startOfWeek = new Date(now);
+    startOfWeek.setUTCDate(startOfWeek.getUTCDate() - 7);
+    startOfWeek.setUTCHours(0, 0, 0, 0);
+
     const startOf30DaysAgo = new Date(now);
     startOf30DaysAgo.setDate(startOf30DaysAgo.getDate() - 30);
 
@@ -43,17 +66,56 @@ const getPlatformStats = async (req, res, next) => {
     const [
       totalUsers,
       newUsersToday,
+      newUsersThisWeek,
       totalInsights,
       insightsToday,
+      insightsThisWeek,
+      highConfidenceInsights,
+      bestValueInsights,
+      avgEdge30dAgg,
+      byConfidenceAgg,
+      byDataQualityAgg,
+      byRecommendationAgg,
       totalCreditsSpent,
       totalRevenueCents,
       activePropsCount,
       scheduledGamesCount,
+      outcomeSummary,
     ] = await Promise.all([
       User.countDocuments(),
       User.countDocuments({ createdAt: { $gte: startOfToday } }),
+      User.countDocuments({ createdAt: { $gte: startOfWeek } }),
       Insight.countDocuments({ status: INSIGHT_STATUS.GENERATED }),
       Insight.countDocuments({ status: INSIGHT_STATUS.GENERATED, createdAt: { $gte: startOfToday } }),
+      Insight.countDocuments({ status: INSIGHT_STATUS.GENERATED, createdAt: { $gte: startOfWeek } }),
+      Insight.countDocuments({ status: INSIGHT_STATUS.GENERATED, isHighConfidence: true }),
+      Insight.countDocuments({ status: INSIGHT_STATUS.GENERATED, isBestValue: true }),
+
+      // Average absolute edge over last 30 days
+      Insight.aggregate([
+        {
+          $match: {
+            status: INSIGHT_STATUS.GENERATED,
+            createdAt: { $gte: startOf30DaysAgo },
+            edgePercentage: { $ne: null },
+          },
+        },
+        { $project: { absEdge: { $abs: '$edgePercentage' } } },
+        { $group: { _id: null, avg: { $avg: '$absEdge' } } },
+      ]),
+
+      Insight.aggregate([
+        { $match: { status: INSIGHT_STATUS.GENERATED } },
+        { $group: { _id: { $ifNull: ['$aiConfidenceLabel', 'unknown'] }, count: { $sum: 1 } } },
+      ]),
+      Insight.aggregate([
+        { $match: { status: INSIGHT_STATUS.GENERATED } },
+        { $group: { _id: { $ifNull: ['$dataQuality', 'unknown'] }, count: { $sum: 1 } } },
+      ]),
+      Insight.aggregate([
+        { $match: { status: INSIGHT_STATUS.GENERATED } },
+        { $group: { _id: { $ifNull: ['$recommendation', 'unknown'] }, count: { $sum: 1 } } },
+      ]),
 
       // Total credits spent on insights (absolute value of negative deltas)
       Transaction.aggregate([
@@ -73,7 +135,25 @@ const getPlatformStats = async (req, res, next) => {
         status: { $in: ['scheduled', 'live'] },
         startTime: { $gte: new Date(Date.now() - 3 * 60 * 60 * 1000) },
       }),
+      InsightOutcomeService.getOutcomeSummary({ includeSamples: true }),
     ]);
+
+    const mapBuckets = (rows, fallbackKeys = []) => {
+      const out = {};
+      fallbackKeys.forEach((k) => { out[k] = 0; });
+      (rows || []).forEach((row) => {
+        if (!row?._id) return;
+        out[String(row._id)] = row.count || 0;
+      });
+      return out;
+    };
+
+    const byConfidence = mapBuckets(byConfidenceAgg, ['high', 'medium', 'low']);
+    const byDataQuality = mapBuckets(byDataQualityAgg, ['strong', 'moderate', 'weak']);
+    const byRecommendation = mapBuckets(byRecommendationAgg, ['over', 'under']);
+    const avgEdge30d = avgEdge30dAgg[0]?.avg != null
+      ? Number(avgEdge30dAgg[0].avg.toFixed(2))
+      : null;
 
     res.status(HTTP_STATUS.OK).json({
       success: true,
@@ -81,11 +161,20 @@ const getPlatformStats = async (req, res, next) => {
         users: {
           total: totalUsers,
           newToday: newUsersToday,
+          newThisWeek: newUsersThisWeek,
         },
         insights: {
           total: totalInsights,
           generatedToday: insightsToday,
+          generatedThisWeek: insightsThisWeek,
+          highConfidence: highConfidenceInsights,
+          bestValue: bestValueInsights,
+          avgEdge30d,
+          byConfidence,
+          byDataQuality,
+          byRecommendation,
         },
+        outcomes: outcomeSummary,
         economy: {
           totalCreditsSpent: totalCreditsSpent[0]?.total || 0,
           // Convert cents to dollars for display
@@ -425,6 +514,113 @@ const getAILogs = async (req, res, next) => {
   }
 };
 
+/**
+ * GET /api/admin/players/health?sport=nba&limit=200
+ * Returns cached player ID rows plus active prop counts for admin debugging.
+ */
+const getPlayerCacheHealth = async (req, res, next) => {
+  try {
+    const sport = String(req.query.sport || 'nba').toLowerCase();
+    const limit = Math.min(parseInt(req.query.limit || '200', 10), 1000);
+    const overrides = parsePlayerIdOverrides();
+
+    const [cachedPlayers, activePropCounts] = await Promise.all([
+      PlayerCache.find({ sport })
+        .sort({ updatedAt: -1, oddsApiName: 1 })
+        .limit(limit)
+        .lean(),
+      PlayerProp.aggregate([
+        {
+          $match: {
+            sport,
+            isAvailable: true,
+            playerName: { $nin: [null, ''] },
+          },
+        },
+        {
+          $group: {
+            _id: '$playerName',
+            activePropCount: { $sum: 1 },
+          },
+        },
+      ]),
+    ]);
+
+    const propCountMap = new Map(activePropCounts.map((row) => [normalizePlayerCacheName(row._id), row.activePropCount]));
+    const rows = cachedPlayers.map((entry) => ({
+      oddsApiName: entry.oddsApiName,
+      resolvedName: entry.apiSportsName || null,
+      apiSportsName: entry.apiSportsName || null,
+      apiSportsId: entry.apiSportsId,
+      teamName: entry.teamName || null,
+      activePropCount: propCountMap.get(entry.oddsApiName) || 0,
+      isOverride: Boolean(overrides[entry.oddsApiName]?.[sport]),
+      updatedAt: entry.updatedAt,
+    }));
+
+    // Include manual overrides even if they are not currently persisted in PlayerCache.
+    const overrideRows = Object.entries(overrides)
+      .filter(([, bySport]) => bySport && Object.prototype.hasOwnProperty.call(bySport, sport))
+      .filter(([name]) => !rows.some((row) => row.oddsApiName === name))
+      .map(([name, bySport]) => ({
+        oddsApiName: name,
+        resolvedName: `override:${name}`,
+        apiSportsName: `override:${name}`,
+        apiSportsId: bySport[sport],
+        teamName: null,
+        activePropCount: propCountMap.get(normalizePlayerCacheName(name)) || 0,
+        isOverride: true,
+        updatedAt: null,
+      }));
+
+    res.status(HTTP_STATUS.OK).json({
+      success: true,
+      players: [...rows, ...overrideRows],
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+/**
+ * DELETE /api/admin/players/:name/cache?sport=nba
+ * Clears a cached player ID so it will be re-resolved on the next watcher cycle.
+ */
+const clearPlayerCacheEntry = async (req, res, next) => {
+  try {
+    const sport = String(req.query.sport || 'nba').toLowerCase();
+    const rawName = req.params.name;
+    const normalizedName = normalizePlayerCacheName(rawName);
+    const overrides = parsePlayerIdOverrides();
+
+    if (!normalizedName) {
+      throw new AppError('Player name is required', HTTP_STATUS.BAD_REQUEST);
+    }
+
+    if (overrides[normalizedName]?.[sport]) {
+      throw new AppError('Manual override entries cannot be cleared here. Update PLAYER_ID_OVERRIDES_JSON instead.', HTTP_STATUS.BAD_REQUEST);
+    }
+
+    const result = await PlayerCache.deleteOne({ oddsApiName: normalizedName, sport });
+
+    logger.info('👑 [AdminController] Cleared player cache entry', {
+      adminId: req.user._id,
+      sport,
+      playerName: normalizedName,
+      deletedCount: result.deletedCount || 0,
+    });
+
+    res.status(HTTP_STATUS.OK).json({
+      success: true,
+      deleted: result.deletedCount || 0,
+      playerName: normalizedName,
+      sport,
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
 module.exports = {
   getPlatformStats,
   listUsers,
@@ -435,4 +631,6 @@ module.exports = {
   listInsights,
   deleteInsight,
   getAILogs,
+  getPlayerCacheHealth,
+  clearPlayerCacheEntry,
 };

@@ -30,7 +30,7 @@ const redisConfig = {
     return delay;
   },
   // Lazy connect: don't connect until first command
-  lazyConnect: false,
+  lazyConnect: true,
   // Max reconnection attempts (null = unlimited)
   maxRetriesPerRequest: 3,
 };

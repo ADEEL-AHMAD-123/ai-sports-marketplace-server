@@ -1,59 +1,62 @@
 /**
- * InsightService.js — Core AI insight generation engine
+ * InsightService.js — AI insight generation engine
  *
- * This is the most critical service in the application.
- * It orchestrates the full data → formula → AI → store pipeline.
+ * Orchestrates the full pipeline: stats → formulas → OpenAI → MongoDB → credits.
  *
- * Flow (from architecture plan):
- *  1. Check MongoDB cold cache — return instantly if insight exists
- *  2. Pre-flight check — verify odds haven't changed significantly
- *  3. Fetch player stats (MongoDB warm cache OR API-Sports)
- *  4. Apply sport-specific formulas via adapter
- *  5. Inject betting context (line) into prompt
- *  6. Call OpenAI
- *  7. Store result in MongoDB cold cache
- *  8. Deduct 1 credit from user
+ * DATA SOURCES:
+ *  Props/odds  → The Odds API Pro (DraftKings lines)
+ *  NBA stats   → API-Sports NBA v2 (game logs, via apiSportsPlayerId on prop)
+ *  MLB stats   → Official MLB Stats API (statsapi.mlb.com, lookup by playerName)
+ *  Injuries    → injuryService (NBA: API-Sports | MLB: official MLB API)
+ *  Game ctx    → gameContext.js (playoff detection, day game detection)
  *
- * Credit rules (STRICTLY enforced here):
- *  - DO NOT deduct if insight already in cache
- *  - DO NOT deduct if pre-flight check fails (odds changed/market closed)
- *  - DO NOT deduct if OpenAI fails (auto-refund)
+ * PIPELINE (10 steps):
+ *  1. MongoDB cold cache — return instantly if insight already exists
+ *  2. Pre-flight odds check — abort if line moved significantly
+ *  3. Fetch player game log (NBA: API-Sports by ID | MLB: official API by name)
+ *  4. Apply sport formulas (NBAFormulas / MLBFormulas)
+ *  5. Fetch injury context for prompt
+ *  6. Detect game context (playoff? day game?) — SESSION 1 ADDITION
+ *  7. Build sport-specific AI prompt (with game context injected)
+ *  8. Call OpenAI (gpt-4o-mini, forced JSON output)
+ *  9. Save insight to MongoDB
+ * 10. Deduct 1 credit
+ *
+ * CREDIT RULES (strictly enforced):
+ *  Never deduct if insight already cached (step 1 hit)
+ *  Never deduct if pre-flight fails (step 2)
+ *  Never deduct if OpenAI fails (step 8)
  */
 
-const OpenAI = require('openai');
-const Insight = require('../models/Insight.model');
-const Transaction = require('../models/Transaction.model');
-const User = require('../models/User.model');
-const PlayerProp = require('../models/PlayerProp.model');
+const OpenAI       = require('openai');
+const Insight      = require('../models/Insight.model');
+const Transaction  = require('../models/Transaction.model');
+const User         = require('../models/User.model');
+const PlayerProp   = require('../models/PlayerProp.model');
+const { Game }     = require('../models/Game.model');
+const { cacheDel } = require('../config/redis');
+const StrategyService = require('./StrategyService');
+const PlayerStatsSnapshotService = require('./PlayerStatsSnapshotService');
 const { getAdapter } = require('./adapters/adapterRegistry');
+const { getInjuryPromptContext, getPlayerInjuryStatus } = require('./injuryService');
+const { detectNBAGameContext, detectMLBGameContext } = require('./adapters/shared/gameContext');
+const { buildStarterMatchupBlock } = require('./adapters/mlb/MLBStarterService');
+const { getGameDefensiveContext } = require('./adapters/nba/NBADefensiveStatsService');
+const { getParkFactors } = require('./adapters/mlb/MLBBallparkFactors');
+const { getPlatoonMatchup } = require('./adapters/mlb/MLBPlatoonService');
 const {
   INSIGHT_STATUS,
   ODDS_CHANGE_THRESHOLD,
   AI_PROMPT,
   CREDITS,
   TRANSACTION_TYPES,
-  SPORTS,
 } = require('../config/constants');
 const logger = require('../config/logger');
 
-// ─── OpenAI client ─────────────────────────────────────────────────────────────
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 class InsightService {
-  /**
-   * Main entry point: generate or retrieve a betting insight.
-   *
-   * @param {Object} params
-   * @param {string} params.sport         - e.g., 'nba'
-   * @param {string} params.eventId       - The Odds API event ID
-   * @param {string} params.playerName
-   * @param {string} params.statType      - e.g., 'points', 'rebounds'
-   * @param {number} params.bettingLine   - The line (e.g., 25.5)
-   * @param {string} params.marketType    - e.g., 'player_prop'
-   * @param {Object} params.user          - Mongoose User document (with credits)
-   * @param {number|null} params.apiSportsPlayerId - API-Sports player ID (optional — fetched from prop if not provided)
-   * @returns {Promise<{ insight: Object, creditDeducted: boolean }>}
-   */
+
   async generateInsight({
     sport,
     eventId,
@@ -64,128 +67,239 @@ class InsightService {
     user,
     apiSportsPlayerId = null,
   }) {
-    const logContext = { sport, eventId, playerName, statType, bettingLine, userId: user._id };
-    logger.info('🧠 [InsightService] Starting insight generation', logContext);
+    const logCtx = { sport, eventId, playerName, statType, bettingLine, userId: user._id };
+    logger.info('🧠 [InsightService] Starting insight generation', logCtx);
 
-    // ── STEP 1: Check cold cache (MongoDB) ────────────────────────────────────
-    // If this exact insight already exists and is valid → return instantly
+    // ── STEP 1: MongoDB cold cache ─────────────────────────────────────────
     const existing = await Insight.findExisting({ sport, eventId, playerName, statType, bettingLine });
-
     if (existing) {
-      logger.info('⚡ [InsightService] Cache HIT — returning stored insight', logContext);
-
-      // Track that this user unlocked it (without deducting credits again)
+      logger.info('⚡ [InsightService] Cache HIT', logCtx);
       if (!user.hasUnlockedInsight(existing._id)) {
-        await User.findByIdAndUpdate(user._id, {
-          $addToSet: { unlockedInsights: existing._id },
-        });
+        await User.findByIdAndUpdate(user._id, { $addToSet: { unlockedInsights: existing._id } });
         await Insight.findByIdAndUpdate(existing._id, { $inc: { unlockCount: 1 } });
       }
-
       return { insight: existing, creditDeducted: false };
     }
 
-    logger.info('💨 [InsightService] Cache MISS — generating new insight', logContext);
+    logger.info('💨 [InsightService] Cache MISS — generating', logCtx);
 
-    // ── STEP 2: Pre-flight check — verify current odds ────────────────────────
-    // ALWAYS fetch fresh odds before generating an insight.
-    // If the line has moved significantly, abort and tell the user to refresh.
-    const preflightResult = await this._runPreflightCheck({
-      sport,
-      eventId,
-      playerName,
-      statType,
-      bettingLine,
-    });
-
-    if (!preflightResult.passed) {
-      logger.warn('🔴 [InsightService] Pre-flight FAILED — odds changed or market closed', {
-        ...logContext,
-        reason: preflightResult.reason,
-        currentLine: preflightResult.currentLine,
-      });
-      return { insight: null, creditDeducted: false, preflightFailed: true, reason: preflightResult.reason };
+    // ── STEP 2: Pre-flight odds check ──────────────────────────────────────
+    const preflight = await this._runPreflightCheck({ sport, eventId, playerName, statType, bettingLine });
+    if (!preflight.passed) {
+      logger.warn('🔴 [InsightService] Pre-flight FAILED', { ...logCtx, reason: preflight.reason });
+      return { insight: null, creditDeducted: false, preflightFailed: true, reason: preflight.reason };
     }
+    logger.info('✅ [InsightService] Pre-flight passed', logCtx);
 
-    logger.info('✅ [InsightService] Pre-flight passed', logContext);
+    // ── STEP 3: Fetch player stats ─────────────────────────────────────────
+    let rawStats   = [];
+    let resolvedId = apiSportsPlayerId;
 
-    // ── STEP 3: Fetch player stats ─────────────────────────────────────────────
-    // Try to find the player ID from the stored prop if not provided
-    let resolvedPlayerId = apiSportsPlayerId;
-    if (!resolvedPlayerId) {
-      const prop = await PlayerProp.findOne({ oddsEventId: eventId, playerName, statType }).lean();
-      resolvedPlayerId = prop?.apiSportsPlayerId || null;
-    }
-
-    let rawStats = [];
-    if (resolvedPlayerId) {
-      try {
-        const adapter = getAdapter(sport);
-        rawStats = await adapter.fetchPlayerStats({ playerId: resolvedPlayerId });
-
-        // Block insight if fewer than 10 games available — same threshold as PropCard filter
-        if (rawStats.length > 0 && rawStats.length < 10) {
-          logger.warn('[InsightService] Blocking insight — insufficient game data', {
-            ...logContext, gamesAvailable: rawStats.length,
-          });
-          return {
-            insight:        null,
-            creditDeducted: false,
-            error:          `Only ${rawStats.length} games available. Need at least 10 for a reliable insight.`,
-          };
+    try {
+      if (sport === 'mlb' || sport === 'nhl') {
+        rawStats = await PlayerStatsSnapshotService.getPlayerStats({
+          sport,
+          playerName,
+          isPitcher: statType === 'pitcher_strikeouts',
+        }) || [];
+      } else {
+        if (!resolvedId) {
+          const prop = await PlayerProp.findOne({ oddsEventId: eventId, playerName, statType }).lean();
+          resolvedId = prop?.apiSportsPlayerId || null;
         }
-      } catch (statsError) {
-        logger.warn('[InsightService] Could not fetch player stats — proceeding with empty stats', {
-          ...logContext,
-          error: statsError.message,
-        });
+        if (resolvedId) {
+          rawStats = await PlayerStatsSnapshotService.getPlayerStats({
+            sport,
+            playerName,
+            playerId: resolvedId,
+          }) || [];
+        }
       }
+
+      if (!rawStats.length) {
+        logger.warn('[InsightService] No stats found — proceeding with empty data', logCtx);
+      }
+    } catch (statsErr) {
+      logger.warn('[InsightService] Stats fetch failed — proceeding', {
+        ...logCtx, error: statsErr.message,
+      });
     }
 
-    // ── STEP 4: Apply formulas ─────────────────────────────────────────────────
-    const adapter = getAdapter(sport);
-    const processedStats = adapter.applyFormulas(rawStats, statType);
+    // ── STEP 4: Apply formulas ─────────────────────────────────────────────
+    const adapter        = getAdapter(sport);
+    const processedStats = adapter.applyFormulas(
+      rawStats, statType,
+      { isPitcher: statType === 'pitcher_strikeouts' }
+    );
+    logger.debug('📐 [InsightService] Formulas applied', logCtx);
 
-    logger.debug('📐 [InsightService] Formulas applied', { ...logContext, processedStats });
+    // ── STEP 5: Injury context ─────────────────────────────────────────────
+    let injuryContext = '';
+    let storedInjuryStatus = null;
+    let storedInjuryReason = null;
+    let game = null;
 
-    // ── STEP 5: Build AI prompt with betting context ───────────────────────────
+    try {
+      game = await Game.findOne({ oddsEventId: eventId }).lean();
+      const teamCtx = {
+        homeTeamName: game?.homeTeam?.name,
+        awayTeamName: game?.awayTeam?.name,
+      };
+      injuryContext = await getInjuryPromptContext(playerName, teamCtx, sport);
+      if (injuryContext) {
+        const injData = await getPlayerInjuryStatus(playerName, teamCtx, sport);
+        storedInjuryStatus = injData?.status || null;
+        storedInjuryReason = injData?.reason || null;
+        logger.info('[InsightService] Injury flag for player', { playerName, status: storedInjuryStatus });
+      }
+    } catch { /* non-fatal */ }
+
+    // ── STEP 6: Game context detection — SESSION 1 ADDITION ───────────────
+    // Detect if this is a playoff game and build context for the AI prompt.
+    // This was the #1 miss factor: Desmond Bane 7 threes was a playoff game
+    // where his RS avg of 1.9 was completely wrong context.
+    let gameContextData = null;
+    try {
+      if (sport === 'nba') {
+        gameContextData = detectNBAGameContext(game);
+        if (gameContextData.isPlayoff) {
+          logger.info('[InsightService] Playoff game detected', {
+            ...logCtx,
+            round:  gameContextData.round,
+            gameNum: gameContextData.gameNumber,
+          });
+        }
+      }
+      // MLB day game context (minor effect, still useful)
+      if (sport === 'mlb') {
+        const mlbCtx = detectMLBGameContext(game);
+        if (mlbCtx.isDayGame) {
+          logger.debug('[InsightService] MLB day game detected', logCtx);
+        }
+      }
+    } catch { /* non-fatal */ }
+
+    // ── STEP 6b: Starter matchup context (MLB batter props only) — SESSION 2
+    // Read opponent starter name/stats stored on the prop by propWatcher
+    let starterContext = null;
+    if (sport === 'mlb' && statType !== 'pitcher_strikeouts') {
+      try {
+        const propDoc = await PlayerProp.findOne({
+          oddsEventId: eventId, playerName, statType,
+        }).select('opponentStarterName opponentStarterStats opponentStarterName2 opponentStarterStats2').lean();
+
+        if (propDoc?.opponentStarterName) {
+          // Use primary starter — propWatcher assigns the best available
+          starterContext = {
+            starterName:  propDoc.opponentStarterName,
+            starterStats: propDoc.opponentStarterStats || null,
+          };
+          logger.debug('[InsightService] Starter context loaded for batter prop', {
+            playerName, starterName: propDoc.opponentStarterName,
+          });
+        }
+      } catch { /* non-fatal — insight still generates without starter context */ }
+    }
+
+    // ── STEP 6c: NBA opponent defensive stats — SESSION 3 ─────────────────
+    // Fetch how many points/threes/rebounds this game's teams allow per game.
+    // Tells the AI: "Opponent allows 15.2 threes/g vs league avg 13.1 → OVER lean"
+    let defensiveContext = null;
+    if (sport === 'nba' && game) {
+      try {
+        defensiveContext = await getGameDefensiveContext(game);
+        if (defensiveContext.homeTeamDef || defensiveContext.awayTeamDef) {
+          logger.debug('[InsightService] Defensive context loaded', {
+            playerName,
+            homeDefPts: defensiveContext.homeTeamDef?.pointsAllowedPG,
+            awayDefPts: defensiveContext.awayTeamDef?.pointsAllowedPG,
+          });
+        }
+      } catch { /* non-fatal — insight still generates without defensive context */ }
+    }
+
+    // ── STEP 6d: MLB ballpark factors — SESSION 4 ────────────────────────
+    // Park factor is determined by the HOME team — games are always played
+    // at the home team's stadium. No API call needed — static lookup.
+    let parkContext = null;
+    if (sport === 'mlb' && statType !== 'pitcher_strikeouts') {
+      try {
+        const homeTeamName = game?.homeTeam?.name || null;
+        if (homeTeamName && getParkFactors(homeTeamName)) {
+          parkContext = { homeTeamName };
+          logger.debug('[InsightService] Park context loaded', {
+            playerName,
+            homeTeamName,
+            parkFactor: getParkFactors(homeTeamName)?.parkFactor,
+          });
+        }
+      } catch { /* non-fatal */ }
+    }
+
+    // ── STEP 6e: MLB platoon splits — SESSION 5 ──────────────────────────
+    // Fetch batter's career splits vs LHP/RHP and match against starter's hand.
+    // Most consistent predictive edge in MLB: cross-hand matchups = +15-20% avg boost.
+    // Only runs for MLB batter props where we already have a starter name.
+    let platoonContext = null;
+    if (sport === 'mlb' && statType !== 'pitcher_strikeouts') {
+      try {
+        // Read starter name that was stored on the prop by MLBStarterService
+        const propForPlatoon = await PlayerProp.findOne({
+          oddsEventId: eventId, playerName, statType,
+        }).select('opponentStarterName').lean();
+
+        const starterName = propForPlatoon?.opponentStarterName || null;
+
+        if (starterName) {
+          const matchup = await getPlatoonMatchup(playerName, starterName);
+          if (matchup) {
+            platoonContext = { matchup };
+            logger.debug('[InsightService] Platoon context loaded', {
+              playerName,
+              starterName,
+              advantage:  matchup.advantage,
+              matchupAvg: matchup.matchupAvg,
+              delta:      matchup.delta,
+            });
+          }
+        }
+      } catch { /* non-fatal — insight generates without platoon data */ }
+    }
+
+    // ── STEP 7: Build AI prompt ────────────────────────────────────────────
     const prompt = adapter.buildPrompt({
       processedStats,
       playerName,
       statType,
       bettingLine,
       marketType,
+      injuryContext,
+      isPitcher:        statType === 'pitcher_strikeouts',
+      gameContext:      gameContextData,   // NBA: playoff detection (Session 1)
+      starterContext:   starterContext,    // MLB: opponent starter matchup (Session 2)
+      defensiveContext: defensiveContext,  // NBA: opponent defensive stats (Session 3)
+      parkContext:      parkContext,       // MLB: ballpark factors (Session 4)
+      platoonContext:   platoonContext,    // MLB: L/R platoon splits (Session 5)
     });
+    logger.debug('📝 [InsightService] Prompt built', { ...logCtx, promptLength: prompt.length });
 
-    logger.debug('📝 [InsightService] Prompt built', { ...logContext, promptLength: prompt.length });
-
-    // ── STEP 6: Call OpenAI ────────────────────────────────────────────────────
-    let aiResponse;
-    let aiLog;
-
+    // ── STEP 8: Call OpenAI ────────────────────────────────────────────────
+    let aiResponse, aiLog;
     try {
-      aiResponse = await this._callOpenAI(prompt, logContext);
-      aiLog = aiResponse.log;
-    } catch (aiError) {
-      logger.error('❌ [InsightService] OpenAI call failed — refunding credits not needed (not yet deducted)', {
-        ...logContext,
-        error: aiError.message,
-      });
-      // Credits were never deducted — we haven't charged yet at this point
+      aiResponse = await this._callOpenAI(prompt, logCtx);
+      aiLog      = aiResponse.log;
+    } catch (aiErr) {
+      logger.error('❌ [InsightService] OpenAI failed', { ...logCtx, error: aiErr.message });
       return { insight: null, creditDeducted: false, error: 'AI generation failed. Please try again.' };
     }
 
-    // ── STEP 7: Parse AI response ──────────────────────────────────────────────
+    // ── STEP 9: Parse + score + save ──────────────────────────────────────
     const parsed = this._parseAIResponse(aiResponse.text);
-
-    // ── STEP 8: Calculate strategy scores ─────────────────────────────────────
     const { confidenceScore, edgePercentage, isHighConfidence, isBestValue } =
-      this._calculateStrategyScores(processedStats, parsed, bettingLine);
+      this._calculateStrategyScores(processedStats, parsed, bettingLine, sport);
 
-    // ── STEP 9: Save to MongoDB (cold cache) ──────────────────────────────────
-    const aiLogRetentionDays = parseInt(process.env.AI_LOG_RETENTION_DAYS || '30', 10);
     const aiLogExpiresAt = new Date();
-    aiLogExpiresAt.setDate(aiLogExpiresAt.getDate() + aiLogRetentionDays);
+    aiLogExpiresAt.setDate(aiLogExpiresAt.getDate() + parseInt(process.env.AI_LOG_RETENTION_DAYS || '30', 10));
 
     const insight = await Insight.create({
       sport,
@@ -194,174 +308,174 @@ class InsightService {
       statType,
       marketType,
       bettingLine,
-      recommendation: parsed.recommendation,
-      // Structured fields from JSON response — used directly by frontend
-      insightSummary:  parsed.summary     || '',
-      insightFactors:  parsed.factors     || [],
-      insightRisks:    parsed.risks       || [],
+      recommendation:    parsed.recommendation,
+      injuryStatus:      storedInjuryStatus,
+      injuryReason:      storedInjuryReason,
+      insightSummary:    parsed.summary     || '',
+      insightFactors:    parsed.factors     || [],
+      insightRisks:      parsed.risks       || [],
       aiConfidenceLabel: parsed.confidence  || 'medium',
-      dataQuality:     parsed.dataQuality || 'moderate',
-      // Raw text kept as fallback
-      insightText: aiResponse.text,
+      dataQuality:       parsed.dataQuality || 'moderate',
+      insightText:       aiResponse.text,
+      // Stat fields for InsightModal panels — saved flat so frontend reads directly
+      // NBA fields
+      formPoints:         processedStats?.formPoints        ?? null,
+      formRebounds:       processedStats?.formRebounds      ?? null,
+      formAssists:        processedStats?.formAssists       ?? null,
+      formThrees:         processedStats?.formThrees        ?? null,
+      formPointsAssists:  processedStats?.formPointsAssists  ?? null,
+      formMinutes:        processedStats?.formMinutes       ?? null,
+      formGamesCount:     processedStats?.formGamesCount    ?? 5,
+      baselineStatAvg:    processedStats?.baselineStatAvg   ?? null,
+      baselineMinutes:    processedStats?.baselineMinutes   ?? null,
+      baselineGamesCount: processedStats?.baselineGamesCount ?? 30,
+      focusStatAvg:       processedStats?.focusStatAvg      ?? null,
+      edgeGamesCount:     processedStats?.edgeGamesCount    ?? 10,
+      trueShootingPct:    processedStats?.trueShootingPct   ?? null,
+      effectiveFGPct:     processedStats?.effectiveFGPct    ?? null,
+      approxUSGPct:       processedStats?.approxUSGPct      ?? null,
+      // MLB batter fields (read by InsightModal StatWindows MLB panel)
+      hitsPerG:           processedStats?.hitsPerG          ?? null,
+      tbPerG:             processedStats?.tbPerG            ?? null,
+      runsPerG:           processedStats?.runsPerG          ?? null,
+      hrPerG:             processedStats?.hrPerG            ?? null,
+      rbiPerG:            processedStats?.rbiPerG           ?? null,
+      battingAvg:         processedStats?.battingAvg        ?? null,
+      obp:                processedStats?.obp               ?? null,
+      slg:                processedStats?.slg               ?? null,
+      ops:                processedStats?.ops               ?? null,
+      formStatAvg:        processedStats?.formStatAvg       ?? null,
+      // MLB pitcher fields
+      kPerStart:          processedStats?.kPerStart         ?? null,
+      ipPerStart:         processedStats?.ipPerStart        ?? null,
+      era:                processedStats?.era               ?? null,
+      whip:               processedStats?.whip              ?? null,
+      k9:                 processedStats?.k9                ?? null,
+      formKPerStart:      processedStats?.formKPerStart     ?? null,
+      // NHL skater fields
+      goalsPerG:          processedStats?.goalsPerG          ?? null,
+      assistsPerG:        processedStats?.assistsPerG        ?? null,
+      pointsPerG:         processedStats?.pointsPerG         ?? null,
+      shotsPerG:          processedStats?.shotsPerG          ?? null,
+      toiPerG:            processedStats?.toiPerG            ?? null,
+      formStatAvg:        processedStats?.formStatAvg        ?? null,
+      // Session 1: store playoff context on insight
+      isPlayoffGame:     gameContextData?.isPlayoff ?? false,
+      playoffRound:      gameContextData?.round ?? null,
       confidenceScore,
       edgePercentage,
       isHighConfidence,
       isBestValue,
       status: INSIGHT_STATUS.GENERATED,
-      oddsSnapshot: {
-        line: preflightResult.currentLine,
-        fetchedAt: new Date(),
-      },
+      oddsSnapshot: { line: preflight.currentLine, fetchedAt: new Date() },
       aiLog: {
         prompt,
-        rawResponse: aiResponse.text,
-        tokensUsed: aiLog.tokensUsed,
-        model: aiLog.model,
-        latencyMs: aiLog.latencyMs,
+        rawResponse:    aiResponse.text,
+        tokensUsed:     aiLog.tokensUsed,
+        model:          aiLog.model,
+        latencyMs:      aiLog.latencyMs,
         processedStats,
+        gameContext:    gameContextData,
       },
       aiLogExpiresAt,
       unlockCount: 1,
     });
 
-    logger.info('✅ [InsightService] Insight stored in cold cache', { ...logContext, insightId: insight._id });
+    logger.info('✅ [InsightService] Insight saved', { ...logCtx, insightId: insight._id });
 
-    // ── STEP 10: Deduct 1 credit ───────────────────────────────────────────────
-    // We only reach this point if everything succeeded
-    await this._deductCredit({ user, insight, logContext });
+    // ── STEP 10: Deduct credit ─────────────────────────────────────────────
+    await this._deductCredit({ user, insight, logCtx });
 
     return { insight: insight.toObject(), creditDeducted: true };
   }
 
-  // ─── Pre-flight Check ──────────────────────────────────────────────────────
+  // ─── Pre-flight ────────────────────────────────────────────────────────────
 
-  /**
-   * Verify that odds haven't changed significantly before generating an insight.
-   * This prevents generating insights for stale/closed markets.
-   *
-   * @returns {Promise<{ passed: boolean, reason?: string, currentLine?: number }>}
-   */
   async _runPreflightCheck({ sport, eventId, playerName, statType, bettingLine }) {
     try {
       const adapter = getAdapter(sport);
-      const { line: currentLine, isAvailable } = await adapter.fetchCurrentLine(
-        eventId,
-        playerName,
-        statType
-      );
 
-      // Market has closed (player scratched, prop removed, game started, etc.)
-      if (!isAvailable || currentLine === null) {
-        return { passed: false, reason: 'Market is no longer available', currentLine: null };
+      if (adapter.oddsApiQuotaRemaining === 0) {
+        return { passed: false, reason: 'Live odds temporarily unavailable.', currentLine: null };
       }
 
-      // Check if the line has moved significantly since the user saw it
+      const { line: currentLine, isAvailable } = await adapter.fetchCurrentLine(eventId, playerName, statType);
+
+      if (!isAvailable || currentLine === null) {
+        await PlayerProp.updateOne(
+          { sport, oddsEventId: eventId, playerName, statType, isAvailable: true },
+          { $set: { isAvailable: false, lastUpdatedAt: new Date() } }
+        );
+        const gameDoc = await Game.findOne({ sport, oddsEventId: eventId }).select('startTime').lean();
+        const keys = [`props:${sport}:${eventId}:all`, `props:${sport}:${eventId}:highConfidence`, `props:${sport}:${eventId}:bestValue`];
+        if (gameDoc?.startTime) {
+          keys.push(`schedule:${sport}:${new Date(gameDoc.startTime).toISOString().split('T')[0]}`);
+        }
+        await Promise.all(keys.map(k => cacheDel(k)));
+        return { passed: false, reason: 'This prop is no longer available.', currentLine: null };
+      }
+
+      // Per-stat-type thresholds — tight lines (K props, goals) block on 0.5+ moves
+      // Larger-variance stats (pts, rebounds) use the global ODDS_CHANGE_THRESHOLD
+      const statThresholds = {
+        pitcher_strikeouts: 0.5,
+        threes:             0.5,
+        goals:              0.5,
+      };
+      const effectiveThreshold = statThresholds[statType] ?? ODDS_CHANGE_THRESHOLD;
       const lineChange = Math.abs(currentLine - bettingLine);
-      if (lineChange > ODDS_CHANGE_THRESHOLD) {
-        return {
-          passed: false,
-          reason: `Odds have changed (was ${bettingLine}, now ${currentLine})`,
-          currentLine,
-        };
+      if (lineChange > effectiveThreshold) {
+        return { passed: false, reason: `Odds have changed (was ${bettingLine}, now ${currentLine})`, currentLine };
       }
 
       return { passed: true, currentLine };
     } catch (err) {
-      // If we can't verify odds (API down), fail safe — don't generate insight
-      logger.error('[InsightService] Pre-flight check error', { error: err.message });
+      logger.error('[InsightService] Pre-flight error', { error: err.message });
       return { passed: false, reason: 'Could not verify current odds. Please try again.' };
     }
   }
 
-  // ─── OpenAI Call ──────────────────────────────────────────────────────────
+  // ─── OpenAI ────────────────────────────────────────────────────────────────
 
-  /**
-   * Call OpenAI and return the response text + logging metadata.
-   * Logs full input/output for debugging.
-   *
-   * @param {string} prompt
-   * @param {Object} logContext - For structured logging
-   * @returns {Promise<{ text: string, log: Object }>}
-   */
-  async _callOpenAI(prompt, logContext) {
-    const startTime = Date.now();
-
-    logger.info('🤖 [InsightService] Calling OpenAI...', logContext);
-
-    // Log the full prompt in debug mode (useful for prompt engineering)
-    logger.debug('🤖 [InsightService] OpenAI INPUT prompt', {
-      ...logContext,
-      prompt: prompt.substring(0, 500) + (prompt.length > 500 ? '...' : ''),
-    });
+  async _callOpenAI(prompt, logCtx) {
+    const start = Date.now();
+    logger.info('🤖 [InsightService] Calling OpenAI...', logCtx);
 
     const response = await openai.chat.completions.create({
-      model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
-      response_format: { type: 'json_object' }, // Force JSON output — no free text
-      max_tokens: parseInt(process.env.OPENAI_MAX_TOKENS || '800', 10),
-      temperature: parseFloat(process.env.OPENAI_TEMPERATURE || '0.3'),
+      model:           process.env.OPENAI_MODEL || 'gpt-4o-mini',
+      response_format: { type: 'json_object' },
+      max_tokens:      parseInt(process.env.OPENAI_MAX_TOKENS  || '800', 10),
+      temperature:     parseFloat(process.env.OPENAI_TEMPERATURE || '0.3'),
       messages: [
         { role: 'system', content: AI_PROMPT.SYSTEM_ROLE },
-        { role: 'user', content: prompt },
+        { role: 'user',   content: prompt },
       ],
     });
 
-    const latencyMs = Date.now() - startTime;
-    const text = response.choices[0]?.message?.content || '';
+    const latencyMs  = Date.now() - start;
+    const text       = response.choices[0]?.message?.content || '';
     const tokensUsed = response.usage || {};
-    const model = response.model;
+    const model      = response.model;
 
-    // Log the AI output (truncated for terminal, full stored in DB)
-    logger.info('✅ [InsightService] OpenAI response received', {
-      ...logContext,
-      latencyMs,
-      tokensTotal: tokensUsed.total_tokens,
-      model,
+    logger.info('✅ [InsightService] OpenAI response', {
+      ...logCtx, latencyMs, tokensTotal: tokensUsed.total_tokens, model,
     });
 
-    logger.debug('🤖 [InsightService] OpenAI OUTPUT', {
-      ...logContext,
-      responsePreview: text.substring(0, 200) + (text.length > 200 ? '...' : ''),
-    });
-
-    return {
-      text,
-      log: { tokensUsed, model, latencyMs },
-    };
+    return { text, log: { tokensUsed, model, latencyMs } };
   }
 
-  // ─── Parse AI Response ────────────────────────────────────────────────────
+  // ─── Parse ─────────────────────────────────────────────────────────────────
 
-  /**
-   * Extract structured data from the AI's free-text response.
-   * Specifically extracts the OVER/UNDER recommendation.
-   *
-   * @param {string} text - Raw AI response text
-   * @returns {{ recommendation: string|null }}
-   */
-  /**
-   * Parse the AI JSON response.
-   * The prompt now asks for strict JSON — no regex needed.
-   * Falls back gracefully if AI returns malformed output.
-   */
   _parseAIResponse(text) {
     if (!text) return { recommendation: null };
-
     try {
-      // Strip any accidental backticks or markdown the AI might add
-      const clean = text
-        .replace(/```json\s*/gi, '')
-        .replace(/```\s*/g, '')
-        .trim();
-
+      const clean  = text.replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim();
       const parsed = JSON.parse(clean);
-
-      // Validate recommendation field
-      const rec = parsed.recommendation?.toLowerCase();
+      const rec    = parsed.recommendation?.toLowerCase();
       if (rec !== 'over' && rec !== 'under') {
-        logger.warn('[InsightService] AI returned invalid recommendation:', rec);
+        logger.warn('[InsightService] Invalid AI recommendation:', rec);
         return { recommendation: null };
       }
-
       return {
         recommendation: rec,
         confidence:     parsed.confidence  || 'medium',
@@ -371,133 +485,68 @@ class InsightService {
         dataQuality:    parsed.dataQuality || 'moderate',
       };
     } catch (err) {
-      logger.warn('[InsightService] Failed to parse AI JSON response — falling back to text parse', {
-        error: err.message,
-        textPreview: text.slice(0, 100),
-      });
-
-      // Fallback: count OVER/UNDER occurrences (last resort)
-      const upper      = text.toUpperCase();
-      const overCount  = (upper.match(/\bOVER\b/g)  || []).length;
-      const underCount = (upper.match(/\bUNDER\b/g) || []).length;
-      const rec = overCount > underCount ? 'over' : underCount > overCount ? 'under' : null;
-
-      return { recommendation: rec, dataQuality: 'weak' };
+      logger.warn('[InsightService] AI JSON parse failed — text fallback', { error: err.message });
+      const u = text.toUpperCase();
+      const over  = (u.match(/\bOVER\b/g)  || []).length;
+      const under = (u.match(/\bUNDER\b/g) || []).length;
+      return { recommendation: over > under ? 'over' : under > over ? 'under' : null, dataQuality: 'weak' };
     }
   }
 
-  // ─── Strategy Score Calculation ───────────────────────────────────────────
+  // ─── Score calculation ─────────────────────────────────────────────────────
 
-  /**
-   * Calculate confidence score, edge %, and filter tags.
-   *
-   * @param {Object} processedStats
-   * @param {Object} parsed            - Parsed AI response
-   * @param {number} bettingLine
-   * @returns {{ confidenceScore, edgePercentage, isHighConfidence, isBestValue }}
-   */
-  _calculateStrategyScores(processedStats, parsed, bettingLine) {
-    const { recentStatValues = [], focusStatAvg = 0 } = processedStats || {};
-    // Ensure focusStatAvg is a number — may be 'N/A' string if no stats available
-    const focusAvgNum = parseFloat(focusStatAvg) || 0;
-
-    // Confidence: how often the player has exceeded the line recently
-    const direction = parsed.recommendation || 'over';
-    let confidenceScore = 0;
-
-    if (recentStatValues && recentStatValues.length > 0) {
-      const hits = recentStatValues.filter((val) =>
-        direction === 'over' ? val > bettingLine : val < bettingLine
-      ).length;
-      confidenceScore = Math.round((hits / recentStatValues.length) * 100);
-    }
-
-    // Edge: how far the average is from the line
-    const edgePercentage = bettingLine > 0 && focusAvgNum > 0
-      ? parseFloat(((focusAvgNum - bettingLine) / bettingLine) * 100).toFixed(2)
-      : 0;
-
-    // Tags for the filter system
-    const { MIN_CONFIDENCE_HITS, CONFIDENCE_WINDOW, MIN_EDGE_PERCENTAGE } = require('../config/constants');
-    const isHighConfidence = confidenceScore >= (MIN_CONFIDENCE_HITS / CONFIDENCE_WINDOW) * 100;
-    const isBestValue = Math.abs(edgePercentage) >= MIN_EDGE_PERCENTAGE;
-
-    return { confidenceScore, edgePercentage: parseFloat(edgePercentage), isHighConfidence, isBestValue };
+  _calculateStrategyScores(processedStats, parsed, bettingLine, sport = 'nba') {
+    const scores = StrategyService.computeScores(processedStats, bettingLine, { sport });
+    return {
+      confidenceScore:  scores.confidenceScore,
+      edgePercentage:   scores.edgePercentage,
+      isHighConfidence: scores.isHighConfidence,
+      isBestValue:      scores.isBestValue,
+    };
   }
 
-  // ─── Credit Deduction ─────────────────────────────────────────────────────
+  // ─── Credit ────────────────────────────────────────────────────────────────
 
-  /**
-   * Deduct 1 credit from the user and log the transaction.
-   * Called ONLY after successful insight generation.
-   *
-   * @param {Object} params
-   */
-  async _deductCredit({ user, insight, logContext }) {
+  async _deductCredit({ user, insight, logCtx }) {
     const newBalance = user.credits - CREDITS.COST_PER_INSIGHT;
-
     await User.findByIdAndUpdate(user._id, {
-      $inc: { credits: -CREDITS.COST_PER_INSIGHT },
+      $inc:     { credits: -CREDITS.COST_PER_INSIGHT },
       $addToSet: { unlockedInsights: insight._id },
     });
-
     await Transaction.create({
-      userId: user._id,
-      type: TRANSACTION_TYPES.INSIGHT_UNLOCK,
-      creditDelta: -CREDITS.COST_PER_INSIGHT,
+      userId:       user._id,
+      type:         TRANSACTION_TYPES.INSIGHT_UNLOCK,
+      creditDelta:  -CREDITS.COST_PER_INSIGHT,
       balanceAfter: newBalance,
-      description: `Unlocked insight: ${insight.playerName} ${insight.statType} ${insight.bettingLine}`,
+      description:  `Insight: ${insight.playerName} ${insight.statType} ${insight.bettingLine}`,
       insight: {
-        insightId: insight._id,
-        sport: insight.sport,
+        insightId:  insight._id,
+        sport:      insight.sport,
         playerName: insight.playerName,
-        statType: insight.statType,
+        statType:   insight.statType,
       },
     });
-
-    logger.info('💳 [InsightService] Credit deducted', {
-      ...logContext,
-      creditDelta: -CREDITS.COST_PER_INSIGHT,
-      newBalance,
-    });
+    logger.info('💳 [InsightService] Credit deducted', { ...logCtx, newBalance });
   }
 
-  // ─── Refund ───────────────────────────────────────────────────────────────
+  // ─── Refund ────────────────────────────────────────────────────────────────
 
-  /**
-   * Issue a credit refund when AI fails or player becomes unavailable.
-   * This is called from the auto-refund system.
-   *
-   * @param {Object} params
-   * @param {string} params.userId
-   * @param {string} params.insightId
-   * @param {string} params.reason - Human-readable refund reason
-   */
   async issueRefund({ userId, insightId, reason }) {
     const user = await User.findById(userId);
-    if (!user) {
-      logger.error('[InsightService] Refund failed — user not found', { userId });
-      return;
-    }
-
+    if (!user) { logger.error('[InsightService] Refund — user not found', { userId }); return; }
     const newBalance = user.credits + CREDITS.COST_PER_INSIGHT;
-
-    await User.findByIdAndUpdate(userId, {
-      $inc: { credits: CREDITS.COST_PER_INSIGHT },
-    });
-
+    await User.findByIdAndUpdate(userId, { $inc: { credits: CREDITS.COST_PER_INSIGHT } });
     await Transaction.create({
       userId,
-      type: TRANSACTION_TYPES.REFUND,
-      creditDelta: +CREDITS.COST_PER_INSIGHT,
+      type:         TRANSACTION_TYPES.REFUND,
+      creditDelta:  +CREDITS.COST_PER_INSIGHT,
       balanceAfter: newBalance,
-      description: `Refund: ${reason}`,
+      description:  `Refund: ${reason}`,
       refundReason: reason,
-      insight: insightId ? { insightId } : undefined,
+      insight:      insightId ? { insightId } : undefined,
     });
-
-    logger.info('💰 [InsightService] Credit refund issued', { userId, insightId, reason, newBalance });
+    logger.info('💰 [InsightService] Refund issued', { userId, insightId, reason, newBalance });
   }
 }
 
-module.exports = new InsightService(); // Singleton
+module.exports = new InsightService();

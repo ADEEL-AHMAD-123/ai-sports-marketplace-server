@@ -52,7 +52,9 @@ describe('Auth Routes', () => {
     });
 
     it('should return 409 when email already exists', async () => {
-      User.findOne = jest.fn().mockResolvedValue({ email: 'existing@test.com' });
+      User.findOne = jest.fn().mockReturnValue({
+        lean: jest.fn().mockResolvedValue({ email: 'existing@test.com' }),
+      });
 
       const res = await request(app)
         .post('/api/auth/register')
@@ -62,7 +64,9 @@ describe('Auth Routes', () => {
     });
 
     it('should register successfully with valid data', async () => {
-      User.findOne = jest.fn().mockResolvedValue(null);
+      User.findOne = jest.fn().mockReturnValue({
+        lean: jest.fn().mockResolvedValue(null),
+      });
 
       const mockUser = {
         _id: 'user123',
@@ -141,11 +145,9 @@ describe('Auth Routes', () => {
 // ── Credit Routes ─────────────────────────────────────────────────────────────
 
 describe('Credit Routes', () => {
-  it('GET /api/credits/packs should be accessible without auth', async () => {
-    // This route is public — guests need to see pricing before signing up
+  it('GET /api/credits/packs should require auth', async () => {
     const res = await request(app).get('/api/credits/packs');
-    // Will return packs (even if empty if STRIPE_PRICE env not set)
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(401);
   });
 
   it('GET /api/credits/balance should require auth', async () => {

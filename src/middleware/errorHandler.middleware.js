@@ -111,6 +111,18 @@ const errorHandler = (err, req, res, next) => {
     });
   }
 
+  // Mongo connectivity / DNS / server selection failures
+  if (
+    err.name === 'MongoServerSelectionError'
+    || err.name === 'MongooseServerSelectionError'
+    || ['ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'ETIMEDOUT'].includes(err.code)
+  ) {
+    return res.status(HTTP_STATUS.SERVICE_UNAVAILABLE || 503).json({
+      success: false,
+      message: 'Database temporarily unavailable. Please try again shortly.',
+    });
+  }
+
   // ── Operational errors (thrown via AppError) ──────────────────────────────
   if (err.isOperational) {
     return res.status(err.statusCode || HTTP_STATUS.BAD_REQUEST).json({

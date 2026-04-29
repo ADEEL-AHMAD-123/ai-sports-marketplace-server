@@ -22,6 +22,7 @@ const logger = require('./src/config/logger');
 const { registerMorningScraperJob } = require('./src/jobs/morningScraper.job');
 const { registerPropWatcherJob }    = require('./src/jobs/propWatcher.job');
 const { registerPostGameSyncJob }   = require('./src/jobs/postGameSync.job');
+const { registerInjuryRefreshJob }  = require('./src/jobs/injuryRefresh.job');
 
 const PORT = parseInt(process.env.PORT || '5000', 10);
 
@@ -57,6 +58,7 @@ const startServer = async () => {
     registerMorningScraperJob();
     registerPropWatcherJob();
     registerPostGameSyncJob();
+    registerInjuryRefreshJob();
 
     logger.info('⏰ Cron jobs registered');
 

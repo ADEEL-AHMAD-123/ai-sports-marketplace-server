@@ -6,8 +6,11 @@
  * 1. SCHEDULED → LIVE:   Mark games whose startTime has passed as LIVE
  * 2. LIVE → FINAL:       Mark games that started 3.5h+ ago as FINAL
  *                         (NBA avg game = 2h20m, buffer = 1h10m)
- * 3. FINAL → DELETED:    Delete games + props that are 6h+ past start time
- * 4. Redis cache clear:  Invalidate schedule cache after any status change
+ * 3. Re-grade:           Retry grading unresolved insights for all FINAL games
+ *                         (every 15-min cycle, up to ~10 attempts before deletion)
+ * 4. FINAL → DELETED:    Final grading pass, mark leftovers void, then delete
+ *                         games + props that are 6h+ past start time
+ * 5. Redis cache clear:  Invalidate schedule cache after any status change
  *
  * This keeps MongoDB lean and the frontend always accurate.
  */
@@ -15,6 +18,9 @@
 const cron   = require('node-cron');
 const { Game, GAME_STATUS } = require('../models/Game.model');
 const PlayerProp = require('../models/PlayerProp.model');
+const Insight = require('../models/Insight.model');
+const InsightOutcomeService = require('../services/InsightOutcomeService');
+const PlayerStatsSnapshotService = require('../services/PlayerStatsSnapshotService');
 const { cacheDel } = require('../config/redis');
 const logger = require('../config/logger');
 
@@ -78,10 +84,14 @@ const _syncGameLifecycle = async (sport) => {
 
     // Mark props as unavailable — market is closed
     const gameIds = toMarkFinal.map(g => g._id);
+    const eventIds = toMarkFinal.map(g => g.oddsEventId).filter(Boolean);
     await PlayerProp.updateMany(
       { gameId: { $in: gameIds } },
       { $set: { isAvailable: false } }
     );
+
+    const outcomeUpdate = await InsightOutcomeService.persistOutcomesForEvents(eventIds);
+    const staleMarked = await PlayerStatsSnapshotService.markSportSnapshotsStale(sport);
 
     // Clear Redis for each finalized game
     const todayKey = new Date().toISOString().split('T')[0];
@@ -94,8 +104,33 @@ const _syncGameLifecycle = async (sport) => {
 
     logger.info(`🏁 [PostGameSync] Marked ${toMarkFinal.length} games as FINAL for ${sport}`, {
       games: toMarkFinal.map(g => `${g.homeTeam?.name} vs ${g.awayTeam?.name}`),
+      outcomes: outcomeUpdate,
+      staleSnapshotsMarked: staleMarked,
     });
     changes += toMarkFinal.length;
+  }
+
+  // ── Re-grade already-FINAL games that still have unresolved insights ──────
+  // Runs every cycle so a failed first attempt (API timeout, missing key) gets
+  // retried during the 2.5h window between FINAL and deletion.
+  const finalGames = await Game.find({
+    sport,
+    status: GAME_STATUS.FINAL,
+  }).select('_id oddsEventId').lean();
+
+  if (finalGames.length > 0) {
+    const finalEventIds = finalGames.map(g => g.oddsEventId).filter(Boolean);
+    const unresolvedCount = await Insight.countDocuments({
+      eventId: { $in: finalEventIds },
+      status: 'generated',
+      outcomeResult: 'unresolved',
+    });
+    if (unresolvedCount > 0) {
+      const reGradeResult = await InsightOutcomeService.persistOutcomesForEvents(finalEventIds);
+      if (reGradeResult.updated > 0) {
+        logger.info(`♻️  [PostGameSync] Re-graded ${reGradeResult.updated}/${unresolvedCount} unresolved insights for ${sport}`);
+      }
+    }
   }
 
   return changes;
@@ -112,8 +147,22 @@ const _deleteStaleData = async () => {
   if (staleGames.length === 0) return 0;
 
   const ids      = staleGames.map(g => g._id);
-  const eventIds = staleGames.map(g => g.oddsEventId);
+  const eventIds = staleGames.map(g => g.oddsEventId).filter(Boolean);
   const sports   = [...new Set(staleGames.map(g => g.sport))];
+
+  // Final grading pass — game docs still exist so _gradeInsights can resolve stats
+  if (eventIds.length > 0) {
+    await InsightOutcomeService.persistOutcomesForEvents(eventIds);
+    // Any insight still unresolved after this final attempt can never be graded;
+    // mark as void so they don't pollute win-rate stats.
+    const voidResult = await Insight.updateMany(
+      { eventId: { $in: eventIds }, outcomeResult: 'unresolved' },
+      { $set: { outcomeResult: 'void', outcomeGradedAt: new Date() } }
+    );
+    if (voidResult.modifiedCount > 0) {
+      logger.warn(`⚠️  [PostGameSync] Marked ${voidResult.modifiedCount} insights as void (game data expiring)`);
+    }
+  }
 
   // Delete props first (foreign key order)
   await PlayerProp.deleteMany({ gameId: { $in: ids } });

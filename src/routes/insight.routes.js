@@ -16,6 +16,9 @@ router.use(protect);
 // POST /api/insights/unlock — Unlock a new insight (deducts 1 credit)
 router.post('/unlock', validateInsightRequest, insightController.unlockInsight);
 
+// GET /api/insights/my-history — Current user's unlocked insights
+router.get('/my-history', validatePagination, insightController.listMyHistory);
+
 // GET /api/insights — List insights with optional filters
 router.get('/', validatePagination, insightController.listInsights);
 

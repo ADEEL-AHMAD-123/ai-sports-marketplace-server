@@ -56,13 +56,15 @@ const gameSchema = new mongoose.Schema(
       name:         { type: String, required: true },
       abbreviation: String,
       apiSportsId:  Number, // API-Sports team ID — used for official logo URLs
-      logo:         String, // Fallback logo URL
+      logoUrl:      String, // Canonical team logo URL resolved by backend
+      logo:         String, // Legacy fallback field (kept for backward compatibility)
     },
 
     awayTeam: {
       name:         { type: String, required: true },
       abbreviation: String,
       apiSportsId:  Number,
+      logoUrl:      String,
       logo:         String,
     },
 

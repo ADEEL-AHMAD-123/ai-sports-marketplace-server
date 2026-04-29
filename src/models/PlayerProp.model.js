@@ -54,6 +54,12 @@ const playerPropSchema = new mongoose.Schema(
       type: Number,
     },
 
+    // MLB only: true if the player is a pitcher (drives pitching vs batting stat path)
+    isPitcher: {
+      type: Boolean,
+      default: false,
+    },
+
     // ── Prop details ───────────────────────────────────────────────────────────
 
     // The stat being bet on (e.g., "points", "rebounds", "assists", "threes")
@@ -119,6 +125,12 @@ const playerPropSchema = new mongoose.Schema(
       default: null,
     },
 
+    // Focus stat average from the edge window (used in edge-only fallback scoring)
+    focusStatAvg: {
+      type: Number,
+      default: null,
+    },
+
     // ── Smart Filter Tags ──────────────────────────────────────────────────────
     // Pre-computed by the Strategy Engine for fast frontend filtering
 
@@ -163,6 +175,31 @@ const playerPropSchema = new mongoose.Schema(
       index: true,
     },
 
+    // Optional injury metadata precomputed by PropWatcher.
+    // OUT players are marked unavailable; non-OUT statuses remain visible for insight context.
+    injuryStatus: {
+      type: String,
+      default: null,
+      trim: true,
+    },
+
+    injuryReason: {
+      type: String,
+      default: null,
+      trim: true,
+    },
+
+    injurySeverity: {
+      type: String,
+      default: null,
+      trim: true,
+    },
+
+    injuryUpdatedAt: {
+      type: Date,
+      default: null,
+    },
+
     // When the Prop Watcher last updated this prop
     lastUpdatedAt: {
       type: Date,
@@ -185,6 +222,17 @@ playerPropSchema.index(
 // Filter bar queries
 playerPropSchema.index({ sport: 1, isHighConfidence: 1, isAvailable: 1 });
 playerPropSchema.index({ sport: 1, isBestValue: 1, isAvailable: 1 });
+
+// Hot read path: /api/odds/:sport/games/:eventId/props (+ optional filter + sort)
+playerPropSchema.index({
+  sport: 1,
+  oddsEventId: 1,
+  isAvailable: 1,
+  isHighConfidence: 1,
+  isBestValue: 1,
+  confidenceScore: -1,
+  edgePercentage: -1,
+});
 
 // Game-level queries (show all props for a specific game)
 playerPropSchema.index({ gameId: 1, isAvailable: 1 });

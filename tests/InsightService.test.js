@@ -11,30 +11,43 @@
  *  - Refund logic works correctly
  */
 
-const InsightService = require('../src/services/InsightService');
-const Insight = require('../src/models/Insight.model');
-const User = require('../src/models/User.model');
-const Transaction = require('../src/models/Transaction.model');
-const { getAdapter } = require('../src/services/adapters/adapterRegistry');
-const { INSIGHT_STATUS, CREDITS } = require('../src/config/constants');
-
-// ── Mock OpenAI (declare fn before jest.mock) ──────────────────────────────────
-const mockOpenAICreate = jest.fn();
+var mockOpenAICreate;
 
 // ── Mock all external dependencies ────────────────────────────────────────────
 jest.mock('../src/models/Insight.model');
 jest.mock('../src/models/User.model');
 jest.mock('../src/models/Transaction.model');
+jest.mock('../src/models/PlayerProp.model');
+jest.mock('../src/models/Game.model', () => ({
+  Game: {
+    findOne: jest.fn(),
+  },
+}));
 jest.mock('../src/services/adapters/adapterRegistry');
+jest.mock('../src/services/injuryService', () => ({
+  getInjuryPromptContext: jest.fn(),
+  getPlayerInjuryStatus: jest.fn(),
+  isInjurySportSupported: jest.fn().mockReturnValue(true),
+}));
 jest.mock('openai', () => {
   return jest.fn().mockImplementation(() => ({
     chat: {
       completions: {
-        create: mockOpenAICreate,
+        create: (...args) => mockOpenAICreate(...args),
       },
     },
   }));
 });
+
+const InsightService = require('../src/services/InsightService');
+const Insight = require('../src/models/Insight.model');
+const User = require('../src/models/User.model');
+const Transaction = require('../src/models/Transaction.model');
+const PlayerProp = require('../src/models/PlayerProp.model');
+const { Game } = require('../src/models/Game.model');
+const { getAdapter } = require('../src/services/adapters/adapterRegistry');
+const { getInjuryPromptContext, getPlayerInjuryStatus } = require('../src/services/injuryService');
+const { INSIGHT_STATUS, CREDITS } = require('../src/config/constants');
 
 // ── Shared test fixtures ───────────────────────────────────────────────────────
 const mockUser = {
@@ -75,7 +88,7 @@ const mockAdapter = {
 };
 
 const mockOpenAIResponse = {
-  choices: [{ message: { content: 'OVER 25.5 points. LeBron has averaged 28 pts in last 5 games. High TS%.' } }],
+  choices: [{ message: { content: '{"recommendation":"over","confidence":"high","summary":"LeBron projects over 25.5 points.","factors":["10-game avg 28 vs 25.5 line"],"risks":["Minutes volatility"],"dataQuality":"moderate"}' } }],
   usage: { prompt_tokens: 200, completion_tokens: 80, total_tokens: 280 },
   model: 'gpt-4-turbo-preview',
 };
@@ -86,9 +99,21 @@ describe('InsightService', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    mockOpenAICreate = jest.fn();
     getAdapter.mockReturnValue(mockAdapter);
     mockUser.hasUnlockedInsight.mockReturnValue(false);
     mockUser.hasEnoughCredits.mockReturnValue(true);
+    Game.findOne.mockReturnValue({
+      lean: jest.fn().mockResolvedValue({
+        homeTeam: { name: 'Los Angeles Lakers' },
+        awayTeam: { name: 'Golden State Warriors' },
+      }),
+    });
+    PlayerProp.findOne.mockReturnValue({
+      lean: jest.fn().mockResolvedValue({ apiSportsPlayerId: 2544 }),
+    });
+    getPlayerInjuryStatus.mockResolvedValue(null);
+    getInjuryPromptContext.mockResolvedValue('');
   });
 
   // ── CACHE HIT ──────────────────────────────────────────────────────────────

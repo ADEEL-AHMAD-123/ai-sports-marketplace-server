@@ -1,0 +1,346 @@
+{
+  "total": 103,
+  "actionable": 103,
+  "wins": 35,
+  "losses": 20,
+  "pushes": 0,
+  "unresolved": 48,
+  "winRate": 63.64,
+  "bySport": {
+    "mlb": 55
+  },
+  "winsBySport": {
+    "mlb": 35
+  },
+  "lossesBySport": {
+    "mlb": 20
+  },
+  "byRecAll": {
+    "under": 70,
+    "over": 33
+  },
+  "byRecWins": {
+    "under": 30,
+    "over": 5
+  },
+  "byRecLosses": {
+    "under": 6,
+    "over": 14
+  },
+  "topLossStatTypes": [
+    [
+      "hits",
+      10
+    ],
+    [
+      "rbis",
+      4
+    ],
+    [
+      "runs",
+      3
+    ],
+    [
+      "total_bases",
+      2
+    ],
+    [
+      "pitcher_strikeouts",
+      1
+    ]
+  ],
+  "topWinStatTypes": [
+    [
+      "rbis",
+      14
+    ],
+    [
+      "runs",
+      8
+    ],
+    [
+      "total_bases",
+      7
+    ],
+    [
+      "hits",
+      5
+    ],
+    [
+      "pitcher_strikeouts",
+      1
+    ]
+  ],
+  "avgConfidence": {
+    "all": 75.91,
+    "wins": 77.74,
+    "losses": 73.75
+  },
+  "avgAbsEdge": {
+    "all": 47.94,
+    "wins": 48,
+    "losses": 73.31
+  },
+  "sampleLosses": [
+    {
+      "sport": "mlb",
+      "player": "Roman Anthony",
+      "stat": "rbis",
+      "rec": "under",
+      "line": 0.5,
+      "actual": 1,
+      "edge": -74,
+      "conf": 80,
+      "risk": "Potential for unexpected offensive support"
+    },
+    {
+      "sport": "mlb",
+      "player": "Wilyer Abreu",
+      "stat": "rbis",
+      "rec": "under",
+      "line": 0.5,
+      "actual": 1,
+      "edge": -60,
+      "conf": 80,
+      "risk": "Potential for unexpected offensive support"
+    },
+    {
+      "sport": "mlb",
+      "player": "Caleb Durbin",
+      "stat": "rbis",
+      "rec": "under",
+      "line": 0.5,
+      "actual": 1,
+      "edge": -6,
+      "conf": 80,
+      "risk": "Recent form shows a significant drop in RBIs"
+    },
+    {
+      "sport": "mlb",
+      "player": "Steven Matz",
+      "stat": "pitcher_strikeouts",
+      "rec": "over",
+      "line": 3.5,
+      "actual": 2,
+      "edge": 42.86,
+      "conf": 81,
+      "risk": "Potential for reduced innings pitched"
+    },
+    {
+      "sport": "mlb",
+      "player": "Brayan Rocchio",
+      "stat": "hits",
+      "rec": "over",
+      "line": 0.5,
+      "actual": 0,
+      "edge": 126,
+      "conf": 90,
+      "risk": "none significant"
+    },
+    {
+      "sport": "mlb",
+      "player": "Brayan Rocchio",
+      "stat": "total_bases",
+      "rec": "over",
+      "line": 0.5,
+      "actual": 0,
+      "edge": 234,
+      "conf": 90,
+      "risk": "Potential for high K/9 starter impact"
+    },
+    {
+      "sport": "mlb",
+      "player": "Masyn Winn",
+      "stat": "total_bases",
+      "rec": "over",
+      "line": 1.5,
+      "actual": 0,
+      "edge": 11.33,
+      "conf": 54,
+      "risk": "high K/9 starter could impact performance"
+    },
+    {
+      "sport": "mlb",
+      "player": "Nick Gonzales",
+      "stat": "runs",
+      "rec": "under",
+      "line": 0.5,
+      "actual": 1,
+      "edge": -34,
+      "conf": 60,
+      "risk": "Potential for unexpected offensive outburst"
+    }
+  ],
+  "sampleWins": [
+    {
+      "sport": "mlb",
+      "player": "Davis Schneider",
+      "stat": "hits",
+      "rec": "under",
+      "line": 0.5,
+      "actual": 0,
+      "edge": -60,
+      "conf": 100,
+      "risk": "Potential for unexpected performance changes"
+    },
+    {
+      "sport": "mlb",
+      "player": "Davis Schneider",
+      "stat": "total_bases",
+      "rec": "under",
+      "line": 0.5,
+      "actual": 0,
+      "edge": -34,
+      "conf": 100,
+      "risk": "Recent form has shifted significantly."
+    },
+    {
+      "sport": "mlb",
+      "player": "Eloy Jimenez",
+      "stat": "runs",
+      "rec": "under",
+      "line": 0.5,
+      "actual": 0,
+      "edge": -60,
+      "conf": 80,
+      "risk": "Potential for unexpected offensive support"
+    },
+    {
+      "sport": "mlb",
+      "player": "Ernie Clement",
+      "stat": "rbis",
+      "rec": "under",
+      "line": 0.5,
+      "actual": 0,
+      "edge": -46,
+      "conf": 80,
+      "risk": "Potential for unexpected offensive surge"
+    },
+    {
+      "sport": "mlb",
+      "player": "Myles Straw",
+      "stat": "rbis",
+      "rec": "under",
+      "line": 0.5,
+      "actual": 0,
+      "edge": -60,
+      "conf": 80,
+      "risk": "Recent trend shows a slight increase in RBIs/g but still below line."
+    },
+    {
+      "sport": "mlb",
+      "player": "Eloy Jimenez",
+      "stat": "rbis",
+      "rec": "under",
+      "line": 0.5,
+      "actual": 0,
+      "edge": -40,
+      "conf": 80,
+      "risk": "Recent form shows no RBIs in 6 of last 10 games."
+    },
+    {
+      "sport": "mlb",
+      "player": "Ranger Suarez",
+      "stat": "pitcher_strikeouts",
+      "rec": "over",
+      "line": 3.5,
+      "actual": 10,
+      "edge": 8.57,
+      "conf": 81,
+      "risk": "Potential for low innings pitched"
+    },
+    {
+      "sport": "mlb",
+      "player": "Chase DeLauter",
+      "stat": "rbis",
+      "rec": "under",
+      "line": 0.5,
+      "actual": 0,
+      "edge": -6,
+      "conf": 80,
+      "risk": "Potential for unexpected offensive support"
+    }
+  ],
+  "unresolvedSample": [
+    {
+      "sport": "mlb",
+      "player": "Jesus Sanchez",
+      "stat": "runs",
+      "rec": "under",
+      "line": 0.5,
+      "eventId": "eb2a21d7a425f6a975d1eae9da93e4c7",
+      "gameStatus": "final",
+      "actual": null
+    },
+    {
+      "sport": "nba",
+      "player": "Cade Cunningham",
+      "stat": "points_assists",
+      "rec": "under",
+      "line": 38.5,
+      "eventId": "846b0e9b691b5a291619fa22f96c7dfa",
+      "gameStatus": "final",
+      "actual": null
+    },
+    {
+      "sport": "nba",
+      "player": "Franz Wagner",
+      "stat": "points",
+      "rec": "over",
+      "line": 18.5,
+      "eventId": "846b0e9b691b5a291619fa22f96c7dfa",
+      "gameStatus": "final",
+      "actual": null
+    },
+    {
+      "sport": "nba",
+      "player": "Franz Wagner",
+      "stat": "points_assists",
+      "rec": "over",
+      "line": 21.5,
+      "eventId": "846b0e9b691b5a291619fa22f96c7dfa",
+      "gameStatus": "final",
+      "actual": null
+    },
+    {
+      "sport": "mlb",
+      "player": "Pedro Pages",
+      "stat": "total_bases",
+      "rec": "under",
+      "line": 1.5,
+      "eventId": "4231e596c0ccb42a62c16bf46b6854a6",
+      "gameStatus": "final",
+      "actual": null
+    },
+    {
+      "sport": "mlb",
+      "player": "Pedro Pages",
+      "stat": "runs",
+      "rec": "under",
+      "line": 0.5,
+      "eventId": "4231e596c0ccb42a62c16bf46b6854a6",
+      "gameStatus": "final",
+      "actual": null
+    },
+    {
+      "sport": "mlb",
+      "player": "Pedro Pages",
+      "stat": "rbis",
+      "rec": "under",
+      "line": 0.5,
+      "eventId": "4231e596c0ccb42a62c16bf46b6854a6",
+      "gameStatus": "final",
+      "actual": null
+    },
+    {
+      "sport": "mlb",
+      "player": "Pedro Pages",
+      "stat": "hits",
+      "rec": "over",
+      "line": 0.5,
+      "eventId": "4231e596c0ccb42a62c16bf46b6854a6",
+      "gameStatus": "final",
+      "actual": null
+    }
+  ]
+}
