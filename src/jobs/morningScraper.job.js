@@ -6,7 +6,7 @@
 
 const cron   = require('node-cron');
 const { Game } = require('../models/Game.model');
-const { getAdapter, getActiveSports } = require('../services/adapters/adapterRegistry');
+const { getAdapter, getActiveSports } = require('../services/shared/adapterRegistry');
 const { cacheDel } = require('../config/redis');
 const logger = require('../config/logger');
 

@@ -20,8 +20,8 @@ const logger = require('./src/config/logger');
 
 // ── Cron Jobs ──────────────────────────────────────────────────────────────────
 const { registerMorningScraperJob } = require('./src/jobs/morningScraper.job');
-const { registerPropWatcherJob }    = require('./src/jobs/propWatcher.job');
-const { registerPostGameSyncJob }   = require('./src/jobs/postGameSync.job');
+const { registerPropWatcherJob }    = require('./src/jobs/orchestrators/propWatcher.job');
+const { registerPostGameSyncJob }   = require('./src/jobs/orchestrators/postGameSync.job');
 const { registerInjuryRefreshJob }  = require('./src/jobs/injuryRefresh.job');
 
 const PORT = parseInt(process.env.PORT || '5000', 10);

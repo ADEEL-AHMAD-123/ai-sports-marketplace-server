@@ -10,7 +10,7 @@
  */
 
 const { cacheGet, cacheSet } = require('../config/redis');
-const { getAdapter } = require('./adapters/adapterRegistry');
+const { getAdapter } = require('./shared/adapterRegistry');
 const PlayerStatsSnapshot = require('../models/PlayerStatsSnapshot.model');
 const logger = require('../config/logger');
 const mongoose = require('mongoose');

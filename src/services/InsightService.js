@@ -37,13 +37,13 @@ const { Game }     = require('../models/Game.model');
 const { cacheDel } = require('../config/redis');
 const StrategyService = require('./StrategyService');
 const PlayerStatsSnapshotService = require('./PlayerStatsSnapshotService');
-const { getAdapter } = require('./adapters/adapterRegistry');
+const { getAdapter } = require('./shared/adapterRegistry');
 const { getInjuryPromptContext, getPlayerInjuryStatus } = require('./injuryService');
-const { detectNBAGameContext, detectMLBGameContext } = require('./adapters/shared/gameContext');
-const { buildStarterMatchupBlock } = require('./adapters/mlb/MLBStarterService');
-const { getGameDefensiveContext } = require('./adapters/nba/NBADefensiveStatsService');
-const { getParkFactors } = require('./adapters/mlb/MLBBallparkFactors');
-const { getPlatoonMatchup } = require('./adapters/mlb/MLBPlatoonService');
+const { detectNBAGameContext, detectMLBGameContext } = require('./shared/gameContext');
+const { buildStarterMatchupBlock } = require('./sports/mlb/MLBStarterService');
+const { getGameDefensiveContext } = require('./sports/nba/NBADefensiveStatsService');
+const { getParkFactors } = require('./sports/mlb/MLBBallparkFactors');
+const { getPlatoonMatchup } = require('./sports/mlb/MLBPlatoonService');
 const {
   INSIGHT_STATUS,
   ODDS_CHANGE_THRESHOLD,

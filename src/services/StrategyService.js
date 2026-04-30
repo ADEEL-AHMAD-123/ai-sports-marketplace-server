@@ -30,8 +30,9 @@
  */
 
 const PlayerProp = require('../models/PlayerProp.model');
-const { getAdapter } = require('./adapters/adapterRegistry');
+const { getAdapter } = require('./shared/adapterRegistry');
 const { MIN_EDGE_PERCENTAGE, MIN_GAMES_REQUIRED } = require('../config/constants');
+const { getMinEdgeForStat, getMinGamesForStat } = require('../config/leagueProfiles');
 const logger = require('../config/logger');
 
 const HC_THRESHOLD = 57;
@@ -48,7 +49,7 @@ class StrategyService {
         prop.statType,
         { isPitcher: prop.isPitcher || prop.statType === 'pitcher_strikeouts' }
       );
-      const scores = this._computeScores(processedStats, prop.line);
+      const scores = this._computeScores(processedStats, prop.line, { sport: prop.sport, statType: prop.statType });
       await PlayerProp.findByIdAndUpdate(prop._id, scores);
 
       logger.debug('✅ [StrategyService] Scored', {
@@ -98,7 +99,7 @@ class StrategyService {
         if (!stats?.length) {
           // FIX A: use aiPredictedValue OR focusStatAvg — on first run aiPredictedValue is null
           const fallbackAvg = prop.aiPredictedValue ?? prop.focusStatAvg ?? null;
-          const edgeScores  = this._computeEdgeOnlyScores(prop.line, fallbackAvg);
+          const edgeScores  = this._computeEdgeOnlyScores(prop.line, fallbackAvg, { sport: prop.sport, statType: prop.statType });
 
           if (edgeScores) {
             await PlayerProp.findByIdAndUpdate(prop._id, edgeScores);
@@ -115,7 +116,7 @@ class StrategyService {
 
         // Pitchers start every ~5 days — require fewer games than batters
         const isPitcherProp = prop.statType === 'pitcher_strikeouts' || prop.isPitcher;
-        const minGames      = isPitcherProp ? 3 : MIN_GAMES_REQUIRED;
+        const minGames      = getMinGamesForStat(sport, prop.statType);
 
         if (stats.length < minGames) {
           await PlayerProp.findByIdAndUpdate(prop._id, { isAvailable: false });
@@ -151,11 +152,11 @@ class StrategyService {
    * @param {number} bettingLine
    * @returns {{ confidenceScore, edgePercentage, aiPredictedValue, isHighConfidence, isBestValue }}
    */
-  computeScores(processedStats, bettingLine) {
-    return this._computeScores(processedStats, bettingLine);
+  computeScores(processedStats, bettingLine, context = {}) {
+    return this._computeScores(processedStats, bettingLine, context);
   }
 
-  _computeScores(processedStats, bettingLine) {
+  _computeScores(processedStats, bettingLine, context = {}) {
     const { recentStatValues = [], focusStatAvg = 0 } = processedStats || {};
     const focusAvgNum = parseFloat(focusStatAvg) || 0;
 
@@ -191,11 +192,11 @@ class StrategyService {
       edgePercentage,
       aiPredictedValue: focusAvgNum || null,
       isHighConfidence:  confidenceScore >= HC_THRESHOLD,
-      isBestValue:       absEdge >= MIN_EDGE_PERCENTAGE,
+      isBestValue:       absEdge >= getMinEdgeForStat(context?.sport, context?.statType),
     };
   }
 
-  _computeEdgeOnlyScores(bettingLine, focusStatAvg) {
+  _computeEdgeOnlyScores(bettingLine, focusStatAvg, context = {}) {
     const avg = parseFloat(focusStatAvg) || 0;
     if (!avg || !bettingLine) return null;
 
@@ -208,7 +209,7 @@ class StrategyService {
       edgePercentage,
       confidenceScore,
       isHighConfidence: confidenceScore >= HC_THRESHOLD,
-      isBestValue:      absEdge >= MIN_EDGE_PERCENTAGE,
+      isBestValue:      absEdge >= getMinEdgeForStat(context?.sport, context?.statType),
     };
   }
 
@@ -221,3 +222,4 @@ class StrategyService {
 }
 
 module.exports = new StrategyService();
+

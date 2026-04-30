@@ -24,7 +24,7 @@ const {
 } = require('../config/constants');
 const { AppError }           = require('../middleware/errorHandler.middleware');
 const logger                 = require('../config/logger');
-const { getTeamLogoUrl, getApiSportsLogoUrl } = require('../services/adapters/shared/teamMaps');
+const { getTeamLogoUrl, getApiSportsLogoUrl } = require('../services/shared/teamMaps');
 
 // ─── Sports list ───────────────────────────────────────────────────────────────
 
@@ -280,3 +280,4 @@ const _hydrateTeamLogos = (games) => {
 };
 
 module.exports = { getSports, getGames, getProps };
+

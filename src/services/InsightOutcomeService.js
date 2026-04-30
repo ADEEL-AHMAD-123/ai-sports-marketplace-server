@@ -35,7 +35,7 @@
 const Insight      = require('../models/Insight.model');
 const { Game }     = require('../models/Game.model');
 const PlayerProp   = require('../models/PlayerProp.model');
-const { getAdapter } = require('./adapters/adapterRegistry');
+const { getAdapter } = require('./shared/adapterRegistry');
 const { PlayerCache } = require('../utils/playerResolver');
 const logger       = require('../config/logger');
 

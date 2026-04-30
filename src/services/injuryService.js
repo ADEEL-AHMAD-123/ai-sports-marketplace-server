@@ -12,14 +12,20 @@
  *  getInjuryStatusesForGame(gameCtx, sport)   → Map<normalizedName, injury>
  */
 
-const ApiSportsClient = require('./adapters/shared/ApiSportsClient');
-const mlbStatsClient  = require('./adapters/shared/MLBStatsClient');
+const ApiSportsClient = require('./shared/ApiSportsClient');
+const mlbStatsClient  = require('./shared/MLBStatsClient');
 const { cacheGet, cacheSet } = require('../config/redis');
 const logger = require('../config/logger');
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-const SUPPORTED_SPORTS = new Set(['nba', 'mlb']);
+const SUPPORTED_SPORTS = new Set(['nba', 'mlb']); // nhl: no injury API yet
+
+const INJURY_SERVICES = {
+  nba: true,
+  mlb: true,
+  nhl: null,
+};
 
 const INJURY_CACHE_TTL = 30 * 60; // 30 min
 
@@ -146,7 +152,7 @@ function _parseNBAEntry(entry) {
  * Whether this service has injury data for a sport.
  */
 function isInjurySportSupported(sport) {
-  return SUPPORTED_SPORTS.has(sport);
+  return SUPPORTED_SPORTS.has(sport) && INJURY_SERVICES[sport] !== null;
 }
 
 /**

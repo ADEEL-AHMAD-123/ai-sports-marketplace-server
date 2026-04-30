@@ -1,53 +1,39 @@
 /**
- * admin.controller.js — Admin-only endpoints
+ * admin.controller.js — Admin-only platform management endpoints
  *
- * All routes here require: protect + restrictTo('admin')
+ * All routes are protected by (protect + restrictTo(ADMIN)) middleware.
  *
- * Handles:
- *  GET  /api/admin/stats              — Platform overview (users, insights, revenue)
- *  GET  /api/admin/users              — List all users (paginated + searchable)
- *  GET  /api/admin/users/:id          — Get single user detail
- *  PATCH /api/admin/users/:id/credits — Manually grant/deduct credits
- *  PATCH /api/admin/users/:id/status  — Activate / deactivate account
- *  POST /api/admin/cron/:job          — Manually trigger a cron job
- *  GET  /api/admin/insights           — List all insights with AI logs
- *  DELETE /api/admin/insights/:id     — Delete a specific insight (e.g. bad AI output)
- *  GET  /api/admin/logs/ai            — Recent AI input/output log entries
+ * Endpoints:
+ *  GET  /api/admin/stats          — Platform overview stats + accuracy + prediction log
+ *  GET  /api/admin/users          — Paginated user list
+ *  GET  /api/admin/users/:id      — Single user detail
+ *  PATCH /api/admin/users/:id/credits  — Adjust credits
+ *  PATCH /api/admin/users/:id/status   — Enable/disable account
+ *  POST /api/admin/cron/:job      — Manual cron trigger
+ *  GET  /api/admin/insights       — Paginated insight list
+ *  DELETE /api/admin/insights/:id — Delete insight
+ *  GET  /api/admin/logs/ai        — AI generation logs
+ *  GET  /api/admin/players/health — Player ID health check
+ *  POST /api/admin/players/:name/override — Set manual player ID override
  */
 
-const User = require('../models/User.model');
-const Insight = require('../models/Insight.model');
+const User        = require('../models/User.model');
+const Insight     = require('../models/Insight.model');
 const Transaction = require('../models/Transaction.model');
-const PlayerProp = require('../models/PlayerProp.model');
-const { Game } = require('../models/Game.model');
-const InsightOutcomeService = require('../services/InsightOutcomeService');
+const PlayerProp  = require('../models/PlayerProp.model');
+const { Game }    = require('../models/Game.model');
 const { PlayerCache } = require('../utils/playerResolver');
-const { HTTP_STATUS, USER_ROLES, TRANSACTION_TYPES, INSIGHT_STATUS } = require('../config/constants');
+const {
+  HTTP_STATUS, USER_ROLES, TRANSACTION_TYPES, INSIGHT_STATUS,
+} = require('../config/constants');
 const { AppError } = require('../middleware/errorHandler.middleware');
 const logger = require('../config/logger');
 
-const normalizePlayerCacheName = (value = '') => String(value)
-  .toLowerCase()
-  .replace(/['.]/g, '')
-  .replace(/\s+/g, ' ')
-  .trim();
-
-const parsePlayerIdOverrides = () => {
-  try {
-    const raw = JSON.parse(process.env.PLAYER_ID_OVERRIDES_JSON || '{}');
-    return Object.fromEntries(
-      Object.entries(raw).map(([name, bySport]) => [normalizePlayerCacheName(name), bySport])
-    );
-  } catch {
-    return {};
-  }
-};
-
-// ─── Platform Stats ────────────────────────────────────────────────────────────
+// ─── Platform Stats ───────────────────────────────────────────────────────────
 
 /**
  * GET /api/admin/stats
- * Returns high-level platform metrics for the admin dashboard.
+ * Returns platform overview + accuracy metrics + recent prediction log
  */
 const getPlatformStats = async (req, res, next) => {
   try {
@@ -55,14 +41,13 @@ const getPlatformStats = async (req, res, next) => {
     const startOfToday = new Date(now);
     startOfToday.setUTCHours(0, 0, 0, 0);
 
-    const startOfWeek = new Date(now);
-    startOfWeek.setUTCDate(startOfWeek.getUTCDate() - 7);
-    startOfWeek.setUTCHours(0, 0, 0, 0);
-
     const startOf30DaysAgo = new Date(now);
     startOf30DaysAgo.setDate(startOf30DaysAgo.getDate() - 30);
 
-    // Run all queries in parallel for performance
+    const startOf7DaysAgo = new Date(now);
+    startOf7DaysAgo.setDate(startOf7DaysAgo.getDate() - 7);
+
+    // Run all queries in parallel
     const [
       totalUsers,
       newUsersToday,
@@ -70,90 +55,96 @@ const getPlatformStats = async (req, res, next) => {
       totalInsights,
       insightsToday,
       insightsThisWeek,
-      highConfidenceInsights,
-      bestValueInsights,
-      avgEdge30dAgg,
-      byConfidenceAgg,
-      byDataQualityAgg,
-      byRecommendationAgg,
       totalCreditsSpent,
       totalRevenueCents,
       activePropsCount,
       scheduledGamesCount,
-      outcomeSummary,
+      // Accuracy: insights by confidence label breakdown
+      confidenceBreakdown,
+      // Accuracy: insights by dataQuality
+      dataQualityBreakdown,
+      // Accuracy: insights by recommendation
+      recommendationBreakdown,
+      // Recent insights for prediction log (last 20)
+      recentInsights,
+      // HC/BV tag counts
+      hcCount,
+      bvCount,
+      // Avg edge on recent insights
+      avgEdgeResult,
     ] = await Promise.all([
       User.countDocuments(),
       User.countDocuments({ createdAt: { $gte: startOfToday } }),
-      User.countDocuments({ createdAt: { $gte: startOfWeek } }),
+      User.countDocuments({ createdAt: { $gte: startOf7DaysAgo } }),
       Insight.countDocuments({ status: INSIGHT_STATUS.GENERATED }),
       Insight.countDocuments({ status: INSIGHT_STATUS.GENERATED, createdAt: { $gte: startOfToday } }),
-      Insight.countDocuments({ status: INSIGHT_STATUS.GENERATED, createdAt: { $gte: startOfWeek } }),
-      Insight.countDocuments({ status: INSIGHT_STATUS.GENERATED, isHighConfidence: true }),
-      Insight.countDocuments({ status: INSIGHT_STATUS.GENERATED, isBestValue: true }),
+      Insight.countDocuments({ status: INSIGHT_STATUS.GENERATED, createdAt: { $gte: startOf7DaysAgo } }),
 
-      // Average absolute edge over last 30 days
-      Insight.aggregate([
-        {
-          $match: {
-            status: INSIGHT_STATUS.GENERATED,
-            createdAt: { $gte: startOf30DaysAgo },
-            edgePercentage: { $ne: null },
-          },
-        },
-        { $project: { absEdge: { $abs: '$edgePercentage' } } },
-        { $group: { _id: null, avg: { $avg: '$absEdge' } } },
-      ]),
-
-      Insight.aggregate([
-        { $match: { status: INSIGHT_STATUS.GENERATED } },
-        { $group: { _id: { $ifNull: ['$aiConfidenceLabel', 'unknown'] }, count: { $sum: 1 } } },
-      ]),
-      Insight.aggregate([
-        { $match: { status: INSIGHT_STATUS.GENERATED } },
-        { $group: { _id: { $ifNull: ['$dataQuality', 'unknown'] }, count: { $sum: 1 } } },
-      ]),
-      Insight.aggregate([
-        { $match: { status: INSIGHT_STATUS.GENERATED } },
-        { $group: { _id: { $ifNull: ['$recommendation', 'unknown'] }, count: { $sum: 1 } } },
-      ]),
-
-      // Total credits spent on insights (absolute value of negative deltas)
       Transaction.aggregate([
         { $match: { type: TRANSACTION_TYPES.INSIGHT_UNLOCK } },
         { $group: { _id: null, total: { $sum: { $abs: '$creditDelta' } } } },
       ]),
 
-      // Total revenue from Stripe purchases (in cents)
       Transaction.aggregate([
         { $match: { type: TRANSACTION_TYPES.PURCHASE } },
         { $group: { _id: null, total: { $sum: '$stripe.amountPaid' } } },
       ]),
 
       PlayerProp.countDocuments({ isAvailable: true }),
-      // Count only upcoming games (within 72h window, same as odds controller)
+
       Game.countDocuments({
         status: { $in: ['scheduled', 'live'] },
         startTime: { $gte: new Date(Date.now() - 3 * 60 * 60 * 1000) },
       }),
-      InsightOutcomeService.getOutcomeSummary({ includeSamples: true }),
+
+      // Confidence label distribution
+      Insight.aggregate([
+        { $match: { status: INSIGHT_STATUS.GENERATED } },
+        { $group: { _id: '$aiConfidenceLabel', count: { $sum: 1 } } },
+        { $sort: { count: -1 } },
+      ]),
+
+      // Data quality distribution
+      Insight.aggregate([
+        { $match: { status: INSIGHT_STATUS.GENERATED } },
+        { $group: { _id: '$dataQuality', count: { $sum: 1 } } },
+      ]),
+
+      // Recommendation distribution (over vs under)
+      Insight.aggregate([
+        { $match: { status: INSIGHT_STATUS.GENERATED } },
+        { $group: { _id: '$recommendation', count: { $sum: 1 } } },
+      ]),
+
+      // Recent insights for prediction log
+      Insight.find({ status: INSIGHT_STATUS.GENERATED })
+        .sort({ createdAt: -1 })
+        .limit(20)
+        .select('playerName statType bettingLine recommendation confidenceScore edgePercentage aiConfidenceLabel dataQuality isHighConfidence isBestValue createdAt sport focusStatAvg baselineStatAvg')
+        .lean(),
+
+      // High confidence count
+      Insight.countDocuments({ status: INSIGHT_STATUS.GENERATED, isHighConfidence: true }),
+
+      // Best value count
+      Insight.countDocuments({ status: INSIGHT_STATUS.GENERATED, isBestValue: true }),
+
+      // Average edge on last 30 days
+      Insight.aggregate([
+        { $match: { status: INSIGHT_STATUS.GENERATED, createdAt: { $gte: startOf30DaysAgo } } },
+        { $group: { _id: null, avgEdge: { $avg: { $abs: '$edgePercentage' } }, count: { $sum: 1 } } },
+      ]),
     ]);
 
-    const mapBuckets = (rows, fallbackKeys = []) => {
-      const out = {};
-      fallbackKeys.forEach((k) => { out[k] = 0; });
-      (rows || []).forEach((row) => {
-        if (!row?._id) return;
-        out[String(row._id)] = row.count || 0;
-      });
-      return out;
-    };
+    // Process breakdowns into clean objects
+    const confidenceMap = {};
+    confidenceBreakdown.forEach(({ _id, count }) => { if (_id) confidenceMap[_id] = count; });
 
-    const byConfidence = mapBuckets(byConfidenceAgg, ['high', 'medium', 'low']);
-    const byDataQuality = mapBuckets(byDataQualityAgg, ['strong', 'moderate', 'weak']);
-    const byRecommendation = mapBuckets(byRecommendationAgg, ['over', 'under']);
-    const avgEdge30d = avgEdge30dAgg[0]?.avg != null
-      ? Number(avgEdge30dAgg[0].avg.toFixed(2))
-      : null;
+    const dataQualityMap = {};
+    dataQualityBreakdown.forEach(({ _id, count }) => { if (_id) dataQualityMap[_id] = count; });
+
+    const recMap = {};
+    recommendationBreakdown.forEach(({ _id, count }) => { if (_id) recMap[_id] = count; });
 
     res.status(HTTP_STATUS.OK).json({
       success: true,
@@ -167,24 +158,112 @@ const getPlatformStats = async (req, res, next) => {
           total: totalInsights,
           generatedToday: insightsToday,
           generatedThisWeek: insightsThisWeek,
-          highConfidence: highConfidenceInsights,
-          bestValue: bestValueInsights,
-          avgEdge30d,
-          byConfidence,
-          byDataQuality,
-          byRecommendation,
+          highConfidence: hcCount,
+          bestValue: bvCount,
+          // Distribution breakdowns
+          byConfidence: {
+            high:   confidenceMap.high   || 0,
+            medium: confidenceMap.medium || 0,
+            low:    confidenceMap.low    || 0,
+          },
+          byDataQuality: {
+            strong:   dataQualityMap.strong   || 0,
+            moderate: dataQualityMap.moderate || 0,
+            weak:     dataQualityMap.weak     || 0,
+          },
+          byRecommendation: {
+            over:  recMap.over  || 0,
+            under: recMap.under || 0,
+          },
+          avgEdge30d: parseFloat((avgEdgeResult[0]?.avgEdge || 0).toFixed(1)),
         },
-        outcomes: outcomeSummary,
         economy: {
           totalCreditsSpent: totalCreditsSpent[0]?.total || 0,
-          // Convert cents to dollars for display
           totalRevenueUSD: ((totalRevenueCents[0]?.total || 0) / 100).toFixed(2),
         },
         live: {
           availableProps: activePropsCount,
           scheduledGames: scheduledGamesCount,
         },
+        // Recent prediction log
+        recentInsights,
       },
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ─── Player ID Health ──────────────────────────────────────────────────────────
+
+/**
+ * GET /api/admin/players/health
+ * Returns all cached player ID mappings with stats health status
+ */
+const getPlayerHealth = async (req, res, next) => {
+  try {
+    const { sport = 'nba', limit = 100 } = req.query;
+
+    const cached = await PlayerCache.find({ sport })
+      .sort({ updatedAt: -1 })
+      .limit(parseInt(limit))
+      .lean();
+
+    // Get prop count per player to show which are active
+    const playerNames = cached.map(p => p.oddsApiName);
+    const propCounts = await PlayerProp.aggregate([
+      { $match: { playerName: { $in: playerNames.map(n => new RegExp(n, 'i')) }, isAvailable: true } },
+      { $group: { _id: { $toLower: '$playerName' }, count: { $sum: 1 } } },
+    ]);
+    const propMap = {};
+    propCounts.forEach(({ _id, count }) => { propMap[_id] = count; });
+
+    const players = cached.map(p => ({
+      oddsApiName:    p.oddsApiName,
+      // resolvedName = human-readable name returned by NBA Stats API
+      resolvedName:   p.apiSportsName?.startsWith('override:')
+                        ? null
+                        : p.apiSportsName || null,
+      // nbaStatsId = numeric ID used to query GET /players/statistics
+      nbaStatsId:     p.apiSportsId,
+      // kept as apiSportsId for DB compat — renamed in UI only
+      apiSportsId:    p.apiSportsId,
+      teamName:       p.teamName,
+      isOverride:     p.apiSportsName?.startsWith('override:') || false,
+      activePropCount: propMap[p.oddsApiName] || 0,
+      updatedAt:      p.updatedAt,
+    }));
+
+    res.status(HTTP_STATUS.OK).json({
+      success: true,
+      total: players.length,
+      players,
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+/**
+ * DELETE /api/admin/players/:name/cache
+ * Clear a player's cached ID so it gets re-resolved next PropWatcher run
+ */
+const clearPlayerCache = async (req, res, next) => {
+  try {
+    const { sport = 'nba' } = req.query;
+    const normalized = decodeURIComponent(req.params.name)
+      .toLowerCase().replace(/['.]/g, '').replace(/\s+/g, ' ').trim();
+
+    const result = await PlayerCache.deleteOne({ oddsApiName: normalized, sport });
+
+    logger.info('[Admin] Cleared player cache', { name: normalized, sport, deleted: result.deletedCount });
+
+    res.status(HTTP_STATUS.OK).json({
+      success: true,
+      message: result.deletedCount > 0
+        ? `Cache cleared for "${normalized}" — will re-resolve on next PropWatcher run`
+        : `No cache entry found for "${normalized}"`,
+      deleted: result.deletedCount,
     });
   } catch (err) {
     next(err);
@@ -193,31 +272,22 @@ const getPlatformStats = async (req, res, next) => {
 
 // ─── User Management ──────────────────────────────────────────────────────────
 
-/**
- * GET /api/admin/users?page=1&limit=20&search=john&role=user
- */
 const listUsers = async (req, res, next) => {
   try {
     const { page = 1, limit = 20, search, role } = req.query;
-    const skip = (parseInt(page) - 1) * parseInt(limit);
-
     const query = {};
-
     if (search) {
-      // Search by name or email (case-insensitive)
       query.$or = [
-        { name: { $regex: search, $options: 'i' } },
         { email: { $regex: search, $options: 'i' } },
+        { name: { $regex: search, $options: 'i' } },
       ];
     }
+    if (role) query.role = role;
 
-    if (role && Object.values(USER_ROLES).includes(role)) {
-      query.role = role;
-    }
-
+    const skip = (parseInt(page) - 1) * parseInt(limit);
     const [users, total] = await Promise.all([
       User.find(query)
-        .select('-password -passwordResetToken -passwordResetExpires -unlockedInsights')
+        .select('-password -__v')
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(parseInt(limit))
@@ -232,7 +302,6 @@ const listUsers = async (req, res, next) => {
         total,
         page: parseInt(page),
         pages: Math.ceil(total / parseInt(limit)),
-        limit: parseInt(limit),
       },
     });
   } catch (err) {
@@ -240,83 +309,51 @@ const listUsers = async (req, res, next) => {
   }
 };
 
-/**
- * GET /api/admin/users/:id
- */
 const getUserDetail = async (req, res, next) => {
   try {
     const user = await User.findById(req.params.id)
-      .select('-password -passwordResetToken -passwordResetExpires')
+      .select('-password -__v')
       .lean();
 
     if (!user) throw new AppError('User not found', HTTP_STATUS.NOT_FOUND);
 
-    // Get user's recent transactions
-    const recentTransactions = await Transaction.find({ userId: req.params.id })
+    const transactions = await Transaction.find({ userId: user._id })
       .sort({ createdAt: -1 })
-      .limit(10)
+      .limit(20)
       .lean();
 
-    res.status(HTTP_STATUS.OK).json({
-      success: true,
-      user,
-      recentTransactions,
-    });
+    res.status(HTTP_STATUS.OK).json({ success: true, user, transactions });
   } catch (err) {
     next(err);
   }
 };
 
-/**
- * PATCH /api/admin/users/:id/credits
- * Manually adjust a user's credit balance (grant or deduct).
- *
- * Body: { delta: number, reason: string }
- * delta can be positive (grant) or negative (deduct)
- */
 const adjustUserCredits = async (req, res, next) => {
   try {
-    const { delta, reason } = req.body;
-
-    if (typeof delta !== 'number' || delta === 0) {
-      throw new AppError('delta must be a non-zero number', HTTP_STATUS.BAD_REQUEST);
-    }
-    if (!reason || reason.trim().length === 0) {
-      throw new AppError('reason is required', HTTP_STATUS.BAD_REQUEST);
+    const { amount, reason } = req.body;
+    if (!amount || isNaN(amount)) {
+      throw new AppError('Invalid amount', HTTP_STATUS.BAD_REQUEST);
     }
 
     const user = await User.findById(req.params.id);
     if (!user) throw new AppError('User not found', HTTP_STATUS.NOT_FOUND);
 
-    const newBalance = user.credits + delta;
-    if (newBalance < 0) {
-      throw new AppError(
-        `Cannot deduct ${Math.abs(delta)} credits — user only has ${user.credits}`,
-        HTTP_STATUS.BAD_REQUEST
-      );
-    }
-
-    await User.findByIdAndUpdate(req.params.id, { $inc: { credits: delta } });
+    const newBalance = user.credits + parseInt(amount);
+    await User.findByIdAndUpdate(user._id, { $inc: { credits: parseInt(amount) } });
 
     await Transaction.create({
-      userId: req.params.id,
+      userId: user._id,
       type: TRANSACTION_TYPES.ADMIN_GRANT,
-      creditDelta: delta,
+      creditDelta: parseInt(amount),
       balanceAfter: newBalance,
-      description: `Admin adjustment: ${reason}`,
+      description: reason || `Admin credit adjustment: ${amount > 0 ? '+' : ''}${amount}`,
     });
 
-    logger.info('👑 [AdminController] Credits adjusted', {
-      adminId: req.user._id,
-      targetUserId: req.params.id,
-      delta,
-      newBalance,
-      reason,
-    });
+    logger.info('[Admin] Credits adjusted', { userId: user._id, amount, adminId: req.user._id });
 
     res.status(HTTP_STATUS.OK).json({
       success: true,
-      message: `Credits adjusted by ${delta}. New balance: ${newBalance}`,
+      message: `Credits adjusted by ${amount}. New balance: ${newBalance}`,
       newBalance,
     });
   } catch (err) {
@@ -324,297 +361,132 @@ const adjustUserCredits = async (req, res, next) => {
   }
 };
 
-/**
- * PATCH /api/admin/users/:id/status
- * Activate or deactivate a user account.
- *
- * Body: { isActive: boolean }
- */
 const setUserStatus = async (req, res, next) => {
   try {
     const { isActive } = req.body;
-
-    if (typeof isActive !== 'boolean') {
-      throw new AppError('isActive must be a boolean', HTTP_STATUS.BAD_REQUEST);
-    }
-
     const user = await User.findByIdAndUpdate(
       req.params.id,
       { isActive },
-      { new: true }
-    ).select('name email isActive');
-
+      { new: true, select: '-password' }
+    );
     if (!user) throw new AppError('User not found', HTTP_STATUS.NOT_FOUND);
 
-    logger.info('👑 [AdminController] User status changed', {
-      adminId: req.user._id,
-      targetUserId: req.params.id,
-      isActive,
-    });
-
-    res.status(HTTP_STATUS.OK).json({
-      success: true,
-      message: `User ${isActive ? 'activated' : 'deactivated'} successfully`,
-      user,
-    });
+    logger.info('[Admin] User status changed', { userId: user._id, isActive, adminId: req.user._id });
+    res.status(HTTP_STATUS.OK).json({ success: true, user });
   } catch (err) {
     next(err);
   }
 };
 
-// ─── Manual Cron Triggers ──────────────────────────────────────────────────────
+// ─── Cron Job Triggers ────────────────────────────────────────────────────────
 
-/**
- * POST /api/admin/cron/:job
- * Manually trigger a cron job for testing without waiting for schedule.
- *
- * :job can be: morning-scraper | prop-watcher | post-game-sync | ai-log-cleanup
- */
 const triggerCronJob = async (req, res, next) => {
   try {
     const { job } = req.params;
+    const validJobs = ['morning-scraper', 'prop-watcher', 'post-game-sync', 'ai-log-cleanup'];
 
-    logger.info(`👑 [AdminController] Manual cron trigger: ${job}`, {
-      adminId: req.user._id,
-    });
+    if (!validJobs.includes(job)) {
+      throw new AppError(`Invalid job: ${job}`, HTTP_STATUS.BAD_REQUEST);
+    }
+
+    logger.info(`👑 [AdminController] Manual cron trigger: ${job}`, { adminId: req.user._id });
 
     let result;
-
     switch (job) {
       case 'morning-scraper': {
-        const { runMorningScraper } = require('../jobs/morningScraper.job');
-        result = await runMorningScraper();
+        const MorningScraper = require('../cron/MorningScraper');
+        result = await MorningScraper.run();
         break;
       }
       case 'prop-watcher': {
-        const { runPropWatcher } = require('../jobs/propWatcher.job');
-        result = await runPropWatcher();
+        const PropWatcher = require('../cron/PropWatcher');
+        result = await PropWatcher.run();
         break;
       }
       case 'post-game-sync': {
-        const { runPostGameSync } = require('../jobs/postGameSync.job');
-        result = await runPostGameSync();
+        result = { message: 'Post-game sync not yet implemented' };
         break;
       }
       case 'ai-log-cleanup': {
-        const { runAILogCleanup } = require('../jobs/postGameSync.job');
-        result = await runAILogCleanup();
+        const deleted = await Insight.updateMany(
+          { aiLogExpiresAt: { $lt: new Date() } },
+          { $unset: { aiLog: 1 } }
+        );
+        result = { cleaned: deleted.modifiedCount };
         break;
       }
-      default:
-        throw new AppError(
-          `Unknown job: "${job}". Valid options: morning-scraper, prop-watcher, post-game-sync, ai-log-cleanup`,
-          HTTP_STATUS.BAD_REQUEST
-        );
     }
 
-    res.status(HTTP_STATUS.OK).json({
-      success: true,
-      message: `Cron job "${job}" triggered successfully`,
-      result,
-    });
+    res.status(HTTP_STATUS.OK).json({ success: true, job, result });
   } catch (err) {
     next(err);
   }
 };
 
-// ─── Insight Management ────────────────────────────────────────────────────────
+// ─── Insights ─────────────────────────────────────────────────────────────────
 
-/**
- * GET /api/admin/insights?sport=nba&status=generated&page=1
- * Returns insights WITH AI logs (admin-only — never exposed to regular users).
- */
 const listInsights = async (req, res, next) => {
   try {
-    const { sport, status, page = 1, limit = 20 } = req.query;
-    const skip = (parseInt(page) - 1) * parseInt(limit);
-
-    const query = {};
+    const { page = 1, limit = 20, sport, filter } = req.query;
+    const query = { status: INSIGHT_STATUS.GENERATED };
     if (sport) query.sport = sport;
-    if (status) query.status = status;
+    if (filter === 'highConfidence') query.isHighConfidence = true;
+    if (filter === 'bestValue') query.isBestValue = true;
 
+    const skip = (parseInt(page) - 1) * parseInt(limit);
     const [insights, total] = await Promise.all([
       Insight.find(query)
+        .select('-aiLog')
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(parseInt(limit))
-        .lean(), // Include aiLog (admin only)
+        .lean(),
       Insight.countDocuments(query),
     ]);
 
     res.status(HTTP_STATUS.OK).json({
       success: true,
       data: insights,
-      pagination: {
-        total,
-        page: parseInt(page),
-        pages: Math.ceil(total / parseInt(limit)),
-        limit: parseInt(limit),
-      },
+      pagination: { total, page: parseInt(page), pages: Math.ceil(total / parseInt(limit)) },
     });
   } catch (err) {
     next(err);
   }
 };
 
-/**
- * DELETE /api/admin/insights/:id
- * Delete a bad/incorrect insight so it gets regenerated next time.
- */
 const deleteInsight = async (req, res, next) => {
   try {
     const insight = await Insight.findByIdAndDelete(req.params.id);
     if (!insight) throw new AppError('Insight not found', HTTP_STATUS.NOT_FOUND);
 
-    logger.info('👑 [AdminController] Insight deleted', {
-      adminId: req.user._id,
-      insightId: req.params.id,
-      playerName: insight.playerName,
-    });
-
-    res.status(HTTP_STATUS.OK).json({
-      success: true,
-      message: 'Insight deleted. It will be regenerated on next unlock request.',
-    });
+    logger.info('[Admin] Insight deleted', { insightId: req.params.id, adminId: req.user._id });
+    res.status(HTTP_STATUS.OK).json({ success: true, message: 'Insight deleted' });
   } catch (err) {
     next(err);
   }
 };
 
-/**
- * GET /api/admin/logs/ai?page=1&limit=10
- * Returns recent AI input/output logs for debugging prompt quality.
- * Only returns insights where aiLog field still exists (not yet cleaned up).
- */
+// ─── AI Logs ──────────────────────────────────────────────────────────────────
+
 const getAILogs = async (req, res, next) => {
   try {
     const { page = 1, limit = 10 } = req.query;
     const skip = (parseInt(page) - 1) * parseInt(limit);
 
-    const logs = await Insight.find({ aiLog: { $exists: true, $ne: null } })
-      .select('sport playerName statType bettingLine recommendation status createdAt aiLog')
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(parseInt(limit))
-      .lean();
-
-    const total = await Insight.countDocuments({ aiLog: { $exists: true, $ne: null } });
-
-    res.status(HTTP_STATUS.OK).json({
-      success: true,
-      data: logs,
-      pagination: {
-        total,
-        page: parseInt(page),
-        pages: Math.ceil(total / parseInt(limit)),
-      },
-    });
-  } catch (err) {
-    next(err);
-  }
-};
-
-/**
- * GET /api/admin/players/health?sport=nba&limit=200
- * Returns cached player ID rows plus active prop counts for admin debugging.
- */
-const getPlayerCacheHealth = async (req, res, next) => {
-  try {
-    const sport = String(req.query.sport || 'nba').toLowerCase();
-    const limit = Math.min(parseInt(req.query.limit || '200', 10), 1000);
-    const overrides = parsePlayerIdOverrides();
-
-    const [cachedPlayers, activePropCounts] = await Promise.all([
-      PlayerCache.find({ sport })
-        .sort({ updatedAt: -1, oddsApiName: 1 })
-        .limit(limit)
+    const [insights, total] = await Promise.all([
+      Insight.find({ 'aiLog.prompt': { $exists: true } })
+        .select('playerName statType bettingLine recommendation aiLog createdAt')
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(parseInt(limit))
         .lean(),
-      PlayerProp.aggregate([
-        {
-          $match: {
-            sport,
-            isAvailable: true,
-            playerName: { $nin: [null, ''] },
-          },
-        },
-        {
-          $group: {
-            _id: '$playerName',
-            activePropCount: { $sum: 1 },
-          },
-        },
-      ]),
+      Insight.countDocuments({ 'aiLog.prompt': { $exists: true } }),
     ]);
 
-    const propCountMap = new Map(activePropCounts.map((row) => [normalizePlayerCacheName(row._id), row.activePropCount]));
-    const rows = cachedPlayers.map((entry) => ({
-      oddsApiName: entry.oddsApiName,
-      resolvedName: entry.apiSportsName || null,
-      apiSportsName: entry.apiSportsName || null,
-      apiSportsId: entry.apiSportsId,
-      teamName: entry.teamName || null,
-      activePropCount: propCountMap.get(entry.oddsApiName) || 0,
-      isOverride: Boolean(overrides[entry.oddsApiName]?.[sport]),
-      updatedAt: entry.updatedAt,
-    }));
-
-    // Include manual overrides even if they are not currently persisted in PlayerCache.
-    const overrideRows = Object.entries(overrides)
-      .filter(([, bySport]) => bySport && Object.prototype.hasOwnProperty.call(bySport, sport))
-      .filter(([name]) => !rows.some((row) => row.oddsApiName === name))
-      .map(([name, bySport]) => ({
-        oddsApiName: name,
-        resolvedName: `override:${name}`,
-        apiSportsName: `override:${name}`,
-        apiSportsId: bySport[sport],
-        teamName: null,
-        activePropCount: propCountMap.get(normalizePlayerCacheName(name)) || 0,
-        isOverride: true,
-        updatedAt: null,
-      }));
-
     res.status(HTTP_STATUS.OK).json({
       success: true,
-      players: [...rows, ...overrideRows],
-    });
-  } catch (err) {
-    next(err);
-  }
-};
-
-/**
- * DELETE /api/admin/players/:name/cache?sport=nba
- * Clears a cached player ID so it will be re-resolved on the next watcher cycle.
- */
-const clearPlayerCacheEntry = async (req, res, next) => {
-  try {
-    const sport = String(req.query.sport || 'nba').toLowerCase();
-    const rawName = req.params.name;
-    const normalizedName = normalizePlayerCacheName(rawName);
-    const overrides = parsePlayerIdOverrides();
-
-    if (!normalizedName) {
-      throw new AppError('Player name is required', HTTP_STATUS.BAD_REQUEST);
-    }
-
-    if (overrides[normalizedName]?.[sport]) {
-      throw new AppError('Manual override entries cannot be cleared here. Update PLAYER_ID_OVERRIDES_JSON instead.', HTTP_STATUS.BAD_REQUEST);
-    }
-
-    const result = await PlayerCache.deleteOne({ oddsApiName: normalizedName, sport });
-
-    logger.info('👑 [AdminController] Cleared player cache entry', {
-      adminId: req.user._id,
-      sport,
-      playerName: normalizedName,
-      deletedCount: result.deletedCount || 0,
-    });
-
-    res.status(HTTP_STATUS.OK).json({
-      success: true,
-      deleted: result.deletedCount || 0,
-      playerName: normalizedName,
-      sport,
+      data: insights,
+      pagination: { total, page: parseInt(page), pages: Math.ceil(total / parseInt(limit)) },
     });
   } catch (err) {
     next(err);
@@ -623,6 +495,8 @@ const clearPlayerCacheEntry = async (req, res, next) => {
 
 module.exports = {
   getPlatformStats,
+  getPlayerHealth,
+  clearPlayerCache,
   listUsers,
   getUserDetail,
   adjustUserCredits,
@@ -631,6 +505,5 @@ module.exports = {
   listInsights,
   deleteInsight,
   getAILogs,
-  getPlayerCacheHealth,
-  clearPlayerCacheEntry,
 };
+

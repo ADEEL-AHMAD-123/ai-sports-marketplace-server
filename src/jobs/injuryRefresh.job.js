@@ -14,7 +14,7 @@
 const cron = require('node-cron');
 const { Game, GAME_STATUS } = require('../models/Game.model');
 const PlayerProp = require('../models/PlayerProp.model');
-const { getActiveSports } = require('../services/adapters/adapterRegistry');
+const { getActiveSports } = require('../services/shared/adapterRegistry');
 const { getInjuryStatusesForGame, isInjurySportSupported } = require('../services/injuryService');
 const logger = require('../config/logger');
 

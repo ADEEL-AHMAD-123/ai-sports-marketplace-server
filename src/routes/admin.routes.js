@@ -21,8 +21,8 @@ router.patch('/users/:id/credits',       adminController.adjustUserCredits);
 router.patch('/users/:id/status',        adminController.setUserStatus);
 
 // ── Player ID cache health
-router.get('/players/health',            adminController.getPlayerCacheHealth);
-router.delete('/players/:name/cache',    adminController.clearPlayerCacheEntry);
+router.get('/players/health',            adminController.getPlayerHealth);
+router.delete('/players/:name/cache',    adminController.clearPlayerCache);
 
 // ── Cron job triggers
 router.post('/cron/:job',                adminController.triggerCronJob);
