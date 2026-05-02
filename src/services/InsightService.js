@@ -39,11 +39,12 @@ const StrategyService = require('./StrategyService');
 const PlayerStatsSnapshotService = require('./PlayerStatsSnapshotService');
 const { getAdapter } = require('./shared/adapterRegistry');
 const { getInjuryPromptContext, getPlayerInjuryStatus } = require('./injuryService');
-const { detectNBAGameContext, detectMLBGameContext } = require('./shared/gameContext');
-const { buildStarterMatchupBlock } = require('./sports/mlb/MLBStarterService');
-const { getGameDefensiveContext } = require('./sports/nba/NBADefensiveStatsService');
-const { getParkFactors } = require('./sports/mlb/MLBBallparkFactors');
-const { getPlatoonMatchup } = require('./sports/mlb/MLBPlatoonService');
+// Sport-specific insight pipelines — each sport's context enrichment isolated
+const SPORT_PIPELINES = {
+  nba: require('./sports/nba/NBAInsightPipeline'),
+  mlb: require('./sports/mlb/MLBInsightPipeline'),
+  nhl: require('./sports/nhl/NHLInsightPipeline'),
+};
 const {
   INSIGHT_STATUS,
   ODDS_CHANGE_THRESHOLD,
@@ -94,17 +95,28 @@ class InsightService {
     // ── STEP 3: Fetch player stats ─────────────────────────────────────────
     let rawStats   = [];
     let resolvedId = apiSportsPlayerId;
+    const adapter  = getAdapter(sport);
+    let prop       = null;
 
     try {
-      if (sport === 'mlb' || sport === 'nhl') {
+      prop = await PlayerProp.findOne({ oddsEventId: eventId, playerName, statType }).lean();
+
+      if (sport === 'mlb') {
         rawStats = await PlayerStatsSnapshotService.getPlayerStats({
           sport,
           playerName,
           isPitcher: statType === 'pitcher_strikeouts',
         }) || [];
+      } else if (sport === 'nhl') {
+        // NHL: resolve player via team rosters from this game, then fetch official NHL game log.
+        rawStats = await adapter.fetchPlayerStats({
+          playerName,
+          homeTeamName: prop?.homeTeamName || null,
+          awayTeamName: prop?.awayTeamName || null,
+        }) || [];
       } else {
+        // NBA and others: use apiSportsPlayerId lookup
         if (!resolvedId) {
-          const prop = await PlayerProp.findOne({ oddsEventId: eventId, playerName, statType }).lean();
           resolvedId = prop?.apiSportsPlayerId || null;
         }
         if (resolvedId) {
@@ -126,7 +138,6 @@ class InsightService {
     }
 
     // ── STEP 4: Apply formulas ─────────────────────────────────────────────
-    const adapter        = getAdapter(sport);
     const processedStats = adapter.applyFormulas(
       rawStats, statType,
       { isPitcher: statType === 'pitcher_strikeouts' }
@@ -154,117 +165,42 @@ class InsightService {
       }
     } catch { /* non-fatal */ }
 
-    // ── STEP 6: Game context detection — SESSION 1 ADDITION ───────────────
-    // Detect if this is a playoff game and build context for the AI prompt.
-    // This was the #1 miss factor: Desmond Bane 7 threes was a playoff game
-    // where his RS avg of 1.9 was completely wrong context.
-    let gameContextData = null;
+    // ── STEP 6: Sport-specific context enrichment ───────────────────────────
+    // Each sport's pipeline is isolated in services/sports/{sport}/
+    // NBAInsightPipeline: playoff detection + opponent defense
+    // MLBInsightPipeline: starter inference + ballpark + platoon splits
+    // NHLInsightPipeline: goalie matchup, team context (PP%, defense), playoff detection
+    let sportCtx = {};
     try {
-      if (sport === 'nba') {
-        gameContextData = detectNBAGameContext(game);
-        if (gameContextData.isPlayoff) {
-          logger.info('[InsightService] Playoff game detected', {
-            ...logCtx,
-            round:  gameContextData.round,
-            gameNum: gameContextData.gameNumber,
-          });
-        }
-      }
-      // MLB day game context (minor effect, still useful)
-      if (sport === 'mlb') {
-        const mlbCtx = detectMLBGameContext(game);
-        if (mlbCtx.isDayGame) {
-          logger.debug('[InsightService] MLB day game detected', logCtx);
-        }
-      }
-    } catch { /* non-fatal */ }
-
-    // ── STEP 6b: Starter matchup context (MLB batter props only) — SESSION 2
-    // Read opponent starter name/stats stored on the prop by propWatcher
-    let starterContext = null;
-    if (sport === 'mlb' && statType !== 'pitcher_strikeouts') {
-      try {
-        const propDoc = await PlayerProp.findOne({
-          oddsEventId: eventId, playerName, statType,
-        }).select('opponentStarterName opponentStarterStats opponentStarterName2 opponentStarterStats2').lean();
-
-        if (propDoc?.opponentStarterName) {
-          // Use primary starter — propWatcher assigns the best available
-          starterContext = {
-            starterName:  propDoc.opponentStarterName,
-            starterStats: propDoc.opponentStarterStats || null,
-          };
-          logger.debug('[InsightService] Starter context loaded for batter prop', {
-            playerName, starterName: propDoc.opponentStarterName,
-          });
-        }
-      } catch { /* non-fatal — insight still generates without starter context */ }
-    }
-
-    // ── STEP 6c: NBA opponent defensive stats — SESSION 3 ─────────────────
-    // Fetch how many points/threes/rebounds this game's teams allow per game.
-    // Tells the AI: "Opponent allows 15.2 threes/g vs league avg 13.1 → OVER lean"
-    let defensiveContext = null;
-    if (sport === 'nba' && game) {
-      try {
-        defensiveContext = await getGameDefensiveContext(game);
-        if (defensiveContext.homeTeamDef || defensiveContext.awayTeamDef) {
-          logger.debug('[InsightService] Defensive context loaded', {
+      const pipeline = SPORT_PIPELINES[sport];
+      if (pipeline) {
+        sportCtx = await pipeline.getInsightContext(
+          {
+            statType,
             playerName,
-            homeDefPts: defensiveContext.homeTeamDef?.pointsAllowedPG,
-            awayDefPts: defensiveContext.awayTeamDef?.pointsAllowedPG,
-          });
-        }
-      } catch { /* non-fatal — insight still generates without defensive context */ }
-    }
+            oddsEventId:   eventId,
+            homeTeamName:  prop.homeTeamName || game?.homeTeam?.name || null,
+            awayTeamName:  prop.awayTeamName || game?.awayTeam?.name || null,
+            playerTeam:    prop.playerTeam   || null,
+          },
+          game
+        );
+      }
+    } catch { /* non-fatal — insight generates without sport context */ }
 
-    // ── STEP 6d: MLB ballpark factors — SESSION 4 ────────────────────────
-    // Park factor is determined by the HOME team — games are always played
-    // at the home team's stadium. No API call needed — static lookup.
-    let parkContext = null;
-    if (sport === 'mlb' && statType !== 'pitcher_strikeouts') {
-      try {
-        const homeTeamName = game?.homeTeam?.name || null;
-        if (homeTeamName && getParkFactors(homeTeamName)) {
-          parkContext = { homeTeamName };
-          logger.debug('[InsightService] Park context loaded', {
-            playerName,
-            homeTeamName,
-            parkFactor: getParkFactors(homeTeamName)?.parkFactor,
-          });
-        }
-      } catch { /* non-fatal */ }
-    }
-
-    // ── STEP 6e: MLB platoon splits — SESSION 5 ──────────────────────────
-    // Fetch batter's career splits vs LHP/RHP and match against starter's hand.
-    // Most consistent predictive edge in MLB: cross-hand matchups = +15-20% avg boost.
-    // Only runs for MLB batter props where we already have a starter name.
-    let platoonContext = null;
-    if (sport === 'mlb' && statType !== 'pitcher_strikeouts') {
-      try {
-        // Read starter name that was stored on the prop by MLBStarterService
-        const propForPlatoon = await PlayerProp.findOne({
-          oddsEventId: eventId, playerName, statType,
-        }).select('opponentStarterName').lean();
-
-        const starterName = propForPlatoon?.opponentStarterName || null;
-
-        if (starterName) {
-          const matchup = await getPlatoonMatchup(playerName, starterName);
-          if (matchup) {
-            platoonContext = { matchup };
-            logger.debug('[InsightService] Platoon context loaded', {
-              playerName,
-              starterName,
-              advantage:  matchup.advantage,
-              matchupAvg: matchup.matchupAvg,
-              delta:      matchup.delta,
-            });
-          }
-        }
-      } catch { /* non-fatal — insight generates without platoon data */ }
-    }
+    // Unpack — each adapter.buildPrompt() receives the context keys it expects
+    // NBA
+    const gameContextData    = sportCtx.gameContext     || null;
+    const defensiveContext   = sportCtx.defensiveContext || null;
+    // MLB
+    const starterContext     = sportCtx.starterContext   || null;
+    const parkContext        = sportCtx.parkContext      || null;
+    const platoonContext     = sportCtx.platoonContext   || null;
+    // NHL
+    const goalieContext      = sportCtx.goalieContext    || null;
+    const teamContext        = sportCtx.teamContext      || null;
+    const playerSide         = sportCtx.playerSide       || null;
+    const isPlayoff          = sportCtx.isPlayoff        || false;
 
     // ── STEP 7: Build AI prompt ────────────────────────────────────────────
     const prompt = adapter.buildPrompt({
@@ -275,11 +211,15 @@ class InsightService {
       marketType,
       injuryContext,
       isPitcher:        statType === 'pitcher_strikeouts',
-      gameContext:      gameContextData,   // NBA: playoff detection (Session 1)
-      starterContext:   starterContext,    // MLB: opponent starter matchup (Session 2)
-      defensiveContext: defensiveContext,  // NBA: opponent defensive stats (Session 3)
-      parkContext:      parkContext,       // MLB: ballpark factors (Session 4)
-      platoonContext:   platoonContext,    // MLB: L/R platoon splits (Session 5)
+      gameContext:      gameContextData,   // NBA: playoff detection
+      starterContext:   starterContext,    // MLB: opponent starter matchup
+      defensiveContext: defensiveContext,  // NBA: opponent defensive stats
+      parkContext:      parkContext,       // MLB: ballpark factors
+      platoonContext:   platoonContext,    // MLB: L/R platoon splits
+      goalieContext,                       // NHL: opposing goalie SV% + tier
+      teamContext,                         // NHL: PP%, shots-for/against, defense quality
+      playerSide,                          // NHL: 'home' | 'away' for goalie assignment
+      isPlayoff,                           // NHL: playoff pace adjustment
     });
     logger.debug('📝 [InsightService] Prompt built', { ...logCtx, promptLength: prompt.length });
 
@@ -550,3 +490,4 @@ class InsightService {
 }
 
 module.exports = new InsightService();
+

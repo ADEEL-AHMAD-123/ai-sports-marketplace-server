@@ -16,19 +16,33 @@ const PlayerProp                 = require('../../../models/PlayerProp.model');
 const Insight                    = require('../../../models/Insight.model');
 const InsightOutcomeService      = require('../../../services/InsightOutcomeService');
 const PlayerStatsSnapshotService = require('../../../services/PlayerStatsSnapshotService');
-const { cacheDel }             = require('../../../config/redis');
+const { getAdapter }             = require('../../../services/shared/adapterRegistry');
+const { cacheDel }               = require('../../../config/redis');
 const logger                     = require('../../../config/logger');
 
 const SPORT = 'mlb';
+const FINALIZE_AFTER_HOURS = Number(process.env.MLB_FINALIZE_AFTER_HOURS || process.env.POST_GAME_FINALIZE_AFTER_HOURS || 3.5);
+const STALE_DELETE_AFTER_HOURS = Number(process.env.MLB_STALE_DELETE_AFTER_HOURS || process.env.POST_GAME_STALE_DELETE_AFTER_HOURS || 30);
+const OUTCOME_MAX_RETRY_ATTEMPTS = Math.max(1, parseInt(process.env.OUTCOME_MAX_RETRY_ATTEMPTS || '12', 10));
 
 async function run() {
   logger.info(`🔄 [MLBPostGameSync] Starting...`);
 
-  const now             = new Date();
-  const threeHalfHrsAgo = new Date(now - 3.5 * 3600000);
-  const sixHrsAgo       = new Date(now - 6   * 3600000);
-  const todayKey        = now.toISOString().split('T')[0];
-  let   changes         = 0;
+  const now = new Date();
+  const finalizeCutoff = new Date(now - FINALIZE_AFTER_HOURS * 3600000);
+  const staleCutoff = new Date(now - STALE_DELETE_AFTER_HOURS * 3600000);
+  const todayKey = now.toISOString().split('T')[0];
+  let   changes = 0;
+
+  // Provider scoreboard truth (The Odds API scores endpoint).
+  let providerFinalEventIds = new Set();
+  try {
+    const adapter = getAdapter(SPORT);
+    const finalIds = await adapter.fetchFinalEventIds?.({ daysFrom: 3 });
+    providerFinalEventIds = new Set((finalIds || []).map(String));
+  } catch (err) {
+    logger.warn(`[${SPORT.toUpperCase()}PostGameSync] Provider final check unavailable`, { error: err.message });
+  }
 
   // ── SCHEDULED → LIVE ──────────────────────────────────────────────────────
   const toLive = await Game.find({
@@ -43,10 +57,16 @@ async function run() {
   }
 
   // ── LIVE → FINAL ──────────────────────────────────────────────────────────
-  const toFinal = await Game.find({
-    sport: SPORT, status: GAME_STATUS.LIVE,
-    startTime: { $lte: threeHalfHrsAgo },
+  const liveGames = await Game.find({
+    sport: SPORT,
+    status: GAME_STATUS.LIVE,
   }).lean();
+
+  const toFinal = liveGames.filter(g => {
+    const isTimeFinal = new Date(g.startTime) <= finalizeCutoff;
+    const isProviderFinal = g.oddsEventId && providerFinalEventIds.has(String(g.oddsEventId));
+    return isTimeFinal || isProviderFinal;
+  });
   if (toFinal.length) {
     await Game.updateMany({ _id: { $in: toFinal.map(g => g._id) } }, { $set: { status: GAME_STATUS.FINAL } });
     await PlayerProp.updateMany({ gameId: { $in: toFinal.map(g => g._id) } }, { $set: { isAvailable: false } });
@@ -72,7 +92,7 @@ async function run() {
   if (finalGames.length) {
     const ids             = finalGames.map(g => g.oddsEventId).filter(Boolean);
     const unresolvedCount = await Insight.countDocuments({
-      eventId: { $in: ids }, status: 'generated', outcomeResult: 'unresolved',
+      eventId: { $in: ids }, status: 'generated', outcomeResult: { $in: ['unresolved', null] },
     });
     if (unresolvedCount > 0) {
       const reGrade = await InsightOutcomeService.persistOutcomesForEvents(ids);
@@ -83,7 +103,7 @@ async function run() {
   }
 
   // ── DELETE STALE GAMES (6h+ past start) ───────────────────────────────────
-  const stale = await Game.find({ sport: SPORT, startTime: { $lte: sixHrsAgo } })
+  const stale = await Game.find({ sport: SPORT, status: GAME_STATUS.FINAL, startTime: { $lte: staleCutoff } })
     .select('_id oddsEventId').lean();
   let deleted = 0;
   if (stale.length) {
@@ -92,8 +112,20 @@ async function run() {
     await InsightOutcomeService.persistOutcomesForEvents(staleEventIds);
 
     const voidResult = await Insight.updateMany(
-      { eventId: { $in: staleEventIds }, outcomeResult: 'unresolved' },
-      { $set: { outcomeResult: 'void', outcomeGradedAt: new Date() } }
+      {
+        eventId: { $in: staleEventIds },
+        outcomeResult: { $in: ['unresolved', null] },
+        outcomeAttempts: { $gte: OUTCOME_MAX_RETRY_ATTEMPTS },
+        outcomeReason: { $in: ['game_not_found', 'player_not_found', 'retry_exhausted', 'unsupported_sport'] },
+      },
+      {
+        $set: {
+          outcomeResult: 'void',
+          outcomeReason: 'void_retry_exhausted',
+          outcomeGradedAt: new Date(),
+          outcomeNextRetryAt: null,
+        },
+      }
     );
     if (voidResult.modifiedCount > 0) {
       logger.warn(`⚠️  [${SPORT}PostGameSync] Voided ${voidResult.modifiedCount} insights`);
@@ -110,7 +142,16 @@ async function run() {
     logger.info(`🗑️  [${SPORT}PostGameSync] Deleted ${deleted} stale games`);
   }
 
-  logger.info(`✅ [MLBPostGameSync] Done`, { changes, deleted });
+  logger.info(`✅ [MLBPostGameSync] Done`, {
+    changes,
+    deleted,
+    providerFinalCount: providerFinalEventIds.size,
+    config: {
+      finalizeAfterHours: FINALIZE_AFTER_HOURS,
+      staleDeleteAfterHours: STALE_DELETE_AFTER_HOURS,
+      maxRetryAttempts: OUTCOME_MAX_RETRY_ATTEMPTS,
+    },
+  });
   return { sport: SPORT, changes, deleted };
 }
 

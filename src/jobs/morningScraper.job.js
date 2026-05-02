@@ -4,6 +4,8 @@
  * so the frontend immediately sees fresh data on next request.
  */
 
+require('dotenv').config({ path: require('path').resolve(__dirname, '../../.env') });
+
 const cron   = require('node-cron');
 const { Game } = require('../models/Game.model');
 const { getAdapter, getActiveSports } = require('../services/shared/adapterRegistry');
@@ -81,3 +83,11 @@ const registerMorningScraperJob = () => {
 };
 
 module.exports = { registerMorningScraperJob, runMorningScraper };
+
+if (require.main === module) {
+  const connectDB = require('../config/database');
+  connectDB()
+    .then(() => runMorningScraper())
+    .then(results => { logger.info('Done', { results }); process.exit(0); })
+    .catch(err    => { logger.error('Fatal', { error: err.message }); process.exit(1); });
+}

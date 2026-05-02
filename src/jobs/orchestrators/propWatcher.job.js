@@ -6,6 +6,8 @@
  * Add a new sport: create sports/newSport.propWatcher.js and add to WATCHERS.
  */
 
+require('dotenv').config({ path: require('path').resolve(__dirname, '../../../.env') });
+
 const cron   = require('node-cron');
 const logger = require('../../config/logger');
 
@@ -55,4 +57,12 @@ const registerPropWatcherJob = () => {
 };
 
 module.exports = { registerPropWatcherJob, runPropWatcher };
+
+if (require.main === module) {
+  const connectDB = require('../../config/database');
+  connectDB()
+    .then(() => runPropWatcher())
+    .then(summary => { logger.info('Done', { summary }); process.exit(0); })
+    .catch(err   => { logger.error('Fatal', { error: err.message }); process.exit(1); });
+}
 

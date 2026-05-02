@@ -7,7 +7,6 @@
 
 const { Game, GAME_STATUS } = require('../../../models/Game.model');
 const PlayerProp             = require('../../../models/PlayerProp.model');
-const StrategyService        = require('../../../services/StrategyService');
 const { getAdapter }         = require('../../../services/shared/adapterRegistry');
 const { cacheDel }           = require('../../../config/redis');
 const logger                 = require('../../../config/logger');
@@ -21,7 +20,7 @@ async function run() {
   const now = new Date();
   const games = await Game.find({
     sport:     SPORT,
-    startTime: { $gte: new Date(now - 3*3600000), $lte: new Date(now + 72*3600000) },
+    startTime: { $gte: new Date(now.getTime() - 3*3600000), $lte: new Date(now.getTime() + 72*3600000) },
     status:    { $in: [GAME_STATUS.SCHEDULED, GAME_STATUS.LIVE] },
   }).lean();
 
@@ -56,7 +55,9 @@ async function run() {
     totalUpserted += bulkOps.length;
   }
 
-  await StrategyService.scoreAllPropsForSport(SPORT);
+  // NHL has no player ID resolution yet — skip StrategyService scoring to prevent
+  // all props being hidden (no apiSportsPlayerId → stats=null → isAvailable=false).
+  // Props remain available (isAvailable:true from normalizeProp) without confidence scores.
 
   const dateKey = new Date().toISOString().split('T')[0];
   await cacheDel(`schedule:${SPORT}:${dateKey}`);
@@ -71,4 +72,3 @@ async function run() {
 }
 
 module.exports = { run };
-

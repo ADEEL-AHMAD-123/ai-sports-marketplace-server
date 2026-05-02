@@ -28,6 +28,7 @@ const {
 } = require('../config/constants');
 const { AppError } = require('../middleware/errorHandler.middleware');
 const logger = require('../config/logger');
+const InsightOutcomeService = require('../services/InsightOutcomeService');
 
 // ─── Platform Stats ───────────────────────────────────────────────────────────
 
@@ -72,6 +73,7 @@ const getPlatformStats = async (req, res, next) => {
       bvCount,
       // Avg edge on recent insights
       avgEdgeResult,
+      outcomesSummary,
     ] = await Promise.all([
       User.countDocuments(),
       User.countDocuments({ createdAt: { $gte: startOfToday } }),
@@ -134,6 +136,9 @@ const getPlatformStats = async (req, res, next) => {
         { $match: { status: INSIGHT_STATUS.GENERATED, createdAt: { $gte: startOf30DaysAgo } } },
         { $group: { _id: null, avgEdge: { $avg: { $abs: '$edgePercentage' } }, count: { $sum: 1 } } },
       ]),
+
+      // Outcome summary for admin dashboard / outcomes page
+      InsightOutcomeService.getOutcomeSummary({ sinceDays: 30, limit: 300, includeSamples: true }),
     ]);
 
     // Process breakdowns into clean objects
@@ -185,6 +190,7 @@ const getPlatformStats = async (req, res, next) => {
           availableProps: activePropsCount,
           scheduledGames: scheduledGamesCount,
         },
+        outcomes: outcomesSummary,
         // Recent prediction log
         recentInsights,
       },
@@ -383,39 +389,43 @@ const setUserStatus = async (req, res, next) => {
 const triggerCronJob = async (req, res, next) => {
   try {
     const { job } = req.params;
-    const validJobs = ['morning-scraper', 'prop-watcher', 'post-game-sync', 'ai-log-cleanup'];
-
-    if (!validJobs.includes(job)) {
-      throw new AppError(`Invalid job: ${job}`, HTTP_STATUS.BAD_REQUEST);
-    }
-
     logger.info(`👑 [AdminController] Manual cron trigger: ${job}`, { adminId: req.user._id });
 
     let result;
-    switch (job) {
-      case 'morning-scraper': {
-        const MorningScraper = require('../cron/MorningScraper');
-        result = await MorningScraper.run();
-        break;
-      }
-      case 'prop-watcher': {
-        const PropWatcher = require('../cron/PropWatcher');
-        result = await PropWatcher.run();
-        break;
-      }
-      case 'post-game-sync': {
-        result = { message: 'Post-game sync not yet implemented' };
-        break;
-      }
-      case 'ai-log-cleanup': {
-        const deleted = await Insight.updateMany(
-          { aiLogExpiresAt: { $lt: new Date() } },
-          { $unset: { aiLog: 1 } }
-        );
-        result = { cleaned: deleted.modifiedCount };
-        break;
-      }
+
+    // Job key → actual file path (all paths relative to controllers/)
+    // Structure: jobs/orchestrators/ for full-sport runners
+    //            jobs/sports/{sport}/ for per-sport isolation
+    const JOB_MAP = {
+      'morning-scraper':    ['../jobs/morningScraper.job',                'runMorningScraper'],
+      'prop-watcher':       ['../jobs/orchestrators/propWatcher.job',     'runPropWatcher'],
+      'prop-watcher-nba':   ['../jobs/sports/nba/propWatcher',            'run'],
+      'prop-watcher-mlb':   ['../jobs/sports/mlb/propWatcher',            'run'],
+      'prop-watcher-nhl':   ['../jobs/sports/nhl/propWatcher',            'run'],
+      'post-game-sync':     ['../jobs/orchestrators/postGameSync.job',    'runPostGameSync'],
+      'post-game-sync-nba': ['../jobs/sports/nba/postGameSync',           'run'],
+      'post-game-sync-mlb': ['../jobs/sports/mlb/postGameSync',           'run'],
+      'post-game-sync-nhl': ['../jobs/sports/nhl/postGameSync',           'run'],
+      'ai-log-cleanup':     ['../jobs/orchestrators/postGameSync.job',    'runAILogCleanup'],
+    };
+
+    const jobEntry = JOB_MAP[job];
+    if (!jobEntry) {
+      throw new AppError(
+        `Unknown job: "${job}". Valid: ${Object.keys(JOB_MAP).join(', ')}`,
+        HTTP_STATUS.BAD_REQUEST
+      );
     }
+
+    const [modulePath, fnName] = jobEntry;
+    const jobModule = require(modulePath);
+    const fn = jobModule[fnName];
+
+    if (typeof fn !== 'function') {
+      throw new AppError(`Job module loaded but "${fnName}" is not a function`, 500);
+    }
+
+    result = await fn();
 
     res.status(HTTP_STATUS.OK).json({ success: true, job, result });
   } catch (err) {
@@ -506,4 +516,3 @@ module.exports = {
   deleteInsight,
   getAILogs,
 };
-

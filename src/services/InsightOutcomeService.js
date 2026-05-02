@@ -39,6 +39,9 @@ const { getAdapter } = require('./shared/adapterRegistry');
 const { PlayerCache } = require('../utils/playerResolver');
 const logger       = require('../config/logger');
 
+const OUTCOME_MAX_RETRY_ATTEMPTS = Math.max(1, parseInt(process.env.OUTCOME_MAX_RETRY_ATTEMPTS || '12', 10));
+const OUTCOME_RETRY_BASE_MINUTES = Math.max(5, parseInt(process.env.OUTCOME_RETRY_BASE_MINUTES || '20', 10));
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function parseDateFromRow(row) {
@@ -51,25 +54,6 @@ function parseDateFromRow(row) {
     const parsed = new Date(value);
     if (!Number.isNaN(parsed.getTime())) return parsed;
   }
-  if (sport === 'nhl') {
-    // points = goals + assists (no direct field)
-    if (statType === 'points') {
-      const g = toNum(row.goals);
-      const a = toNum(row.assists);
-      if (Number.isFinite(g) && Number.isFinite(a)) return g + a;
-      return null;
-    }
-    const map = {
-      goals:         ['goals'],
-      assists:        ['assists'],
-      shots_on_goal:  ['shots', 'shotsOnGoal', 'sog'],
-    };
-    for (const key of map[statType] || [statType]) {
-      const value = toNum(row[key]);
-      if (Number.isFinite(value)) return value;
-    }
-  }
-
   return null;
 }
 
@@ -152,6 +136,19 @@ function buildBandSummary(rows, label) {
   };
 }
 
+function _isResolvedResult(result) {
+  return ['win', 'loss', 'push', 'void'].includes(String(result || '').toLowerCase());
+}
+
+function _computeNextRetryAt(attempts, reason = '') {
+  // Exponential backoff capped at 6 hours to avoid hot-loop retries.
+  const minutes = Math.min(360, OUTCOME_RETRY_BASE_MINUTES * (2 ** Math.max(0, attempts - 1)));
+  const base = Number.isFinite(minutes) ? minutes : 60;
+  // Missing game is usually a sync/state lag, retry less aggressively.
+  const adjusted = reason === 'game_not_found' ? Math.max(base, 90) : base;
+  return new Date(Date.now() + adjusted * 60 * 1000);
+}
+
 // ─── Service ──────────────────────────────────────────────────────────────────
 
 class InsightOutcomeService {
@@ -159,14 +156,19 @@ class InsightOutcomeService {
   async persistOutcomesForEvents(eventIds = []) {
     const uniqueIds = [...new Set((eventIds || []).filter(Boolean))];
     if (!uniqueIds.length) return { processed: 0, updated: 0, unresolved: 0 };
+    const now = new Date();
 
     const insights = await Insight.find({
       eventId:        { $in: uniqueIds },
       status:         'generated',
       recommendation: { $in: ['over', 'under'] },
       outcomeResult:  { $nin: ['win', 'loss', 'push', 'void'] },
+      $or: [
+        { outcomeNextRetryAt: null },
+        { outcomeNextRetryAt: { $lte: now } },
+      ],
     })
-      .select('sport eventId playerName statType bettingLine recommendation confidenceScore edgePercentage createdAt')
+      .select('sport eventId playerName statType bettingLine recommendation confidenceScore edgePercentage createdAt outcomeAttempts outcomeReason outcomeNextRetryAt')
       .lean();
 
     if (!insights.length) return { processed: 0, updated: 0, unresolved: 0 };
@@ -174,19 +176,42 @@ class InsightOutcomeService {
     const rows       = await this._gradeInsights(insights);
     const gradedAt   = new Date();
 
-    const operations = rows.map(row => ({
-      updateOne: {
-        filter: { _id: row._id },
-        update: {
-          $set: {
-            outcomeResult:     row.result,
-            outcomeActual:     row.actual,
-            outcomeGameStatus: row.gameStatus || null,
-            outcomeGradedAt:   gradedAt,
+    const operations = rows.map(row => {
+      const previousAttempts = Number(row.outcomeAttempts || 0);
+      const nextAttempts = previousAttempts + 1;
+      const resolved = _isResolvedResult(row.result);
+      const exhausted = nextAttempts >= OUTCOME_MAX_RETRY_ATTEMPTS;
+
+      const unresolvedReason = exhausted ? 'retry_exhausted' : (row.reason || 'unresolved');
+
+      return {
+        updateOne: {
+          filter: { _id: row._id },
+          update: {
+            $set: {
+              outcomeResult:     resolved ? row.result : 'unresolved',
+              outcomeActual:     Number.isFinite(row.actual) ? row.actual : null,
+              outcomeGameStatus: row.gameStatus || null,
+              outcomeGradedAt:   gradedAt,
+              outcomeReason:     resolved ? null : unresolvedReason,
+              outcomeNextRetryAt: resolved || exhausted
+                ? null
+                : _computeNextRetryAt(nextAttempts, row.reason),
+              outcomeSource: {
+                provider: row.sourceProvider || `${row.sport || 'unknown'}-adapter`,
+                gameId: row.sourceGameId || null,
+                gameDate: row.sourceGameDate || null,
+                dateDiffHours: Number.isFinite(row.sourceDateDiffHours) ? row.sourceDateDiffHours : null,
+                statsRowsChecked: Number.isFinite(row.sourceStatsRowsChecked) ? row.sourceStatsRowsChecked : null,
+              },
+            },
+            $inc: {
+              outcomeAttempts: 1,
+            },
           },
         },
-      },
-    }));
+      };
+    });
 
     if (!operations.length) return { processed: insights.length, updated: 0, unresolved: 0 };
 
@@ -250,7 +275,7 @@ class InsightOutcomeService {
         : null;
     };
 
-    const bySportRows = ['nba', 'mlb'].map(sport =>
+    const bySportRows = ['nba', 'mlb', 'nhl'].map(sport =>
       buildBandSummary(resolved.filter(r => r.sport === sport), sport)
     );
 
@@ -348,9 +373,24 @@ class InsightOutcomeService {
 
     for (const insight of insights) {
       const game = gameByEvent.get(insight.eventId);
-      if (!game) continue;
+      if (!game) {
+        rows.push({
+          ...insight,
+          gameStatus: null,
+          result: 'unresolved',
+          actual: null,
+          reason: 'game_not_found',
+          sourceProvider: `${insight.sport || 'unknown'}-adapter`,
+          sourceGameId: null,
+          sourceGameDate: null,
+          sourceDateDiffHours: null,
+          sourceStatsRowsChecked: 0,
+        });
+        continue;
+      }
 
-      const stats       = await this._getStatsForInsight(insight, propIdByKey, playerCacheById, statsCache);
+      const statsPayload = await this._getStatsForInsight(insight, propIdByKey, playerCacheById, statsCache);
+      const stats        = statsPayload.stats || [];
       const targetDate  = new Date(game.startTime);
       let bestRow       = null;
       let bestDiff      = Infinity;
@@ -369,7 +409,18 @@ class InsightOutcomeService {
       const actual = bestRow ? extractStat(bestRow, insight.statType, insight.sport) : null;
 
       if (!Number.isFinite(actual)) {
-        rows.push({ ...insight, gameStatus: game.status, result: 'unresolved', actual: null });
+        rows.push({
+          ...insight,
+          gameStatus: game.status,
+          result: 'unresolved',
+          actual: null,
+          reason: statsPayload.reason || 'no_stat_found',
+          sourceProvider: statsPayload.sourceProvider || `${insight.sport || 'unknown'}-adapter`,
+          sourceGameId: bestRow?.gameId ? String(bestRow.gameId) : null,
+          sourceGameDate: parseDateFromRow(bestRow || {}) || null,
+          sourceDateDiffHours: Number.isFinite(bestDiff) ? Number((bestDiff / 3600000).toFixed(3)) : null,
+          sourceStatsRowsChecked: stats.length,
+        });
         logger.debug('[OutcomeService] No stat found', {
           playerName: insight.playerName, statType: insight.statType,
           statsCount: stats.length, bestRowFound: !!bestRow,
@@ -387,6 +438,12 @@ class InsightOutcomeService {
         gameStatus: game.status,
         actual,
         result: push ? 'push' : (won ? 'win' : 'loss'),
+        reason: null,
+        sourceProvider: statsPayload.sourceProvider || `${insight.sport || 'unknown'}-adapter`,
+        sourceGameId: bestRow?.gameId ? String(bestRow.gameId) : null,
+        sourceGameDate: parseDateFromRow(bestRow || {}) || null,
+        sourceDateDiffHours: Number.isFinite(bestDiff) ? Number((bestDiff / 3600000).toFixed(3)) : null,
+        sourceStatsRowsChecked: stats.length,
       });
     }
 
@@ -404,7 +461,12 @@ class InsightOutcomeService {
           isPitcher:  insight.statType === 'pitcher_strikeouts',
         }) || []);
       }
-      return statsCache.get(cacheKey);
+      const stats = statsCache.get(cacheKey) || [];
+      return {
+        stats,
+        reason: stats.length ? null : 'no_stat_found',
+        sourceProvider: 'mlb-statsapi',
+      };
     }
 
     if (insight.sport === 'nba') {
@@ -430,14 +492,23 @@ class InsightOutcomeService {
         logger.warn('[OutcomeService] No player ID found for NBA insight', {
           playerName: insight.playerName, statType: insight.statType,
         });
-        return [];
+        return {
+          stats: [],
+          reason: 'player_not_found',
+          sourceProvider: 'api-sports-nba',
+        };
       }
 
       const cacheKey = `nba::${playerId}`;
       if (!statsCache.has(cacheKey)) {
         statsCache.set(cacheKey, await adapter.fetchPlayerStats({ playerId }) || []);
       }
-      return statsCache.get(cacheKey);
+      const stats = statsCache.get(cacheKey) || [];
+      return {
+        stats,
+        reason: stats.length ? null : 'no_stat_found',
+        sourceProvider: 'api-sports-nba',
+      };
     }
 
     if (insight.sport === 'nhl') {
@@ -447,10 +518,19 @@ class InsightOutcomeService {
           playerName: insight.playerName,
         }) || []);
       }
-      return statsCache.get(cacheKey);
+      const stats = statsCache.get(cacheKey) || [];
+      return {
+        stats,
+        reason: stats.length ? null : 'no_stat_found',
+        sourceProvider: 'nhl-official',
+      };
     }
 
-    return [];
+    return {
+      stats: [],
+      reason: 'unsupported_sport',
+      sourceProvider: `${insight.sport || 'unknown'}-adapter`,
+    };
   }
 }
 

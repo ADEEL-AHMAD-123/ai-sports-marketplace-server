@@ -89,8 +89,42 @@ const MLB_TEAMS = {
 };
 
 // ─── NHL ─────────────────────────────────────────────────────────────────────
-// Placeholder — fill when building NHLAdapter
-const NHL_TEAMS = {};
+// API-Sports Hockey v1 team IDs (league 57, season 2024)
+const NHL_TEAMS = {
+  'Anaheim Ducks':         { id: 670,  abbr: 'ana' },
+  'Boston Bruins':         { id: 673,  abbr: 'bos' },
+  'Buffalo Sabres':        { id: 674,  abbr: 'buf' },
+  'Calgary Flames':        { id: 675,  abbr: 'cgy' },
+  'Carolina Hurricanes':   { id: 676,  abbr: 'car' },
+  'Chicago Blackhawks':    { id: 678,  abbr: 'chi' },
+  'Colorado Avalanche':    { id: 679,  abbr: 'col' },
+  'Columbus Blue Jackets': { id: 680,  abbr: 'cbj' },
+  'Dallas Stars':          { id: 681,  abbr: 'dal' },
+  'Detroit Red Wings':     { id: 682,  abbr: 'det' },
+  'Edmonton Oilers':       { id: 683,  abbr: 'edm' },
+  'Florida Panthers':      { id: 684,  abbr: 'fla' },
+  'Los Angeles Kings':     { id: 685,  abbr: 'lak' },
+  'Minnesota Wild':        { id: 687,  abbr: 'min' },
+  'Montreal Canadiens':    { id: 688,  abbr: 'mtl' },
+  'Montréal Canadiens': { id: 688, abbr: 'mtl' },
+  'Nashville Predators':   { id: 689,  abbr: 'nsh' },
+  'New Jersey Devils':     { id: 690,  abbr: 'njd' },
+  'New York Islanders':    { id: 691,  abbr: 'nyi' },
+  'New York Rangers':      { id: 692,  abbr: 'nyr' },
+  'Ottawa Senators':       { id: 693,  abbr: 'ott' },
+  'Philadelphia Flyers':   { id: 695,  abbr: 'phi' },
+  'Pittsburgh Penguins':   { id: 696,  abbr: 'pit' },
+  'San Jose Sharks':       { id: 697,  abbr: 'sjs' },
+  'Seattle Kraken':        { id: 1436, abbr: 'sea' },
+  'St. Louis Blues':       { id: 698,  abbr: 'stl' },
+  'Tampa Bay Lightning':   { id: 699,  abbr: 'tbl' },
+  'Toronto Maple Leafs':   { id: 700,  abbr: 'tor' },
+  'Utah Mammoth':          { id: 2483, abbr: 'uta' },
+  'Vancouver Canucks':     { id: 701,  abbr: 'van' },
+  'Vegas Golden Knights':  { id: 702,  abbr: 'vgk' },
+  'Washington Capitals':   { id: 703,  abbr: 'wsh' },
+  'Winnipeg Jets':         { id: 704,  abbr: 'wpg' },
+};
 
 // ─── Lookup helpers ───────────────────────────────────────────────────────────
 

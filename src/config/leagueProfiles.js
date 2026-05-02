@@ -152,13 +152,15 @@ const LEAGUE_PROFILES = {
         { minAbsEdge: 8,  score: 50 },
         { minAbsEdge: 0,  score: 30 },
       ],
-      // shots_on_goal: tight line (3.5-4.5), smaller edge needed
-      // goals: loose signal, require larger edge
+      // shots_on_goal: most consistent NHL stat — tight threshold
+      // goals: high variance (top scorers avg ~0.4-0.5/game) — need large edge
+      // assists: moderate, playmakers more consistent
+      // points: combined g+a, moderate variance
       minEdgeByStatType: {
         shots_on_goal: 12,
         goals:         25,
-        assists:       20,
-        points:        18,
+        assists:       18,
+        points:        15,
       },
     },
   },
@@ -193,3 +195,4 @@ function getMinGamesForStat(sport, statType) {
 }
 
 module.exports = { getLeagueProfile, getMinEdgeForStat, getMinGamesForStat };
+

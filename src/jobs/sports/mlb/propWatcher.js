@@ -27,7 +27,7 @@ async function run() {
   const now = new Date();
   const games = await Game.find({
     sport:     SPORT,
-    startTime: { $gte: new Date(now - 3*3600000), $lte: new Date(now + 72*3600000) },
+    startTime: { $gte: new Date(now.getTime() - 3*3600000), $lte: new Date(now.getTime() + 72*3600000) },
     status:    { $in: [GAME_STATUS.SCHEDULED, GAME_STATUS.LIVE] },
   }).lean();
 

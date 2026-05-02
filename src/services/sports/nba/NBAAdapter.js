@@ -60,6 +60,26 @@ class NBAAdapter extends BaseAdapter {
     }
   }
 
+  async fetchFinalEventIds({ daysFrom = 3 } = {}) {
+    try {
+      const response = await axios.get(
+        `${this.oddsApiBase}/sports/${this.oddsSportKey}/scores`,
+        {
+          params: { apiKey: this.oddsApiKey, daysFrom },
+          timeout: 10000,
+        }
+      );
+      this._trackQuota(response.headers);
+      const games = Array.isArray(response.data) ? response.data : [];
+      return games
+        .filter(g => g?.completed === true && g?.id)
+        .map(g => String(g.id));
+    } catch (err) {
+      logger.warn('⚠️ [NBA] fetchFinalEventIds failed', { error: err.message });
+      return [];
+    }
+  }
+
   // ─── Props ─────────────────────────────────────────────────────────────────
 
   async fetchProps(oddsEventId, { markets = null } = {}) {

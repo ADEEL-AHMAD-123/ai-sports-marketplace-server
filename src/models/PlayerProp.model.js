@@ -49,6 +49,11 @@ const playerPropSchema = new mongoose.Schema(
       trim: true,
     },
 
+    // Denormalized team names — stored by propWatcher so NHLInsightPipeline
+    // can resolve the player's side (home/away) without a Game lookup
+    homeTeamName: { type: String, default: null },
+    awayTeamName: { type: String, default: null },
+
     // API-Sports player ID — used to fetch player stats
     apiSportsPlayerId: {
       type: Number,
