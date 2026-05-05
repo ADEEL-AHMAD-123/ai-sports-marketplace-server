@@ -26,6 +26,8 @@ const redisConfig = {
   host: process.env.REDIS_HOST || '127.0.0.1',
   port: parseInt(process.env.REDIS_PORT || '6379', 10),
   db: parseInt(process.env.REDIS_DB || '0', 10),
+  // TLS required for Upstash and other managed Redis providers
+  ...(process.env.REDIS_TLS === 'true' ? { tls: {} } : {}),
   // Retry strategy: exponential back-off up to 30 seconds
   retryStrategy(times) {
     const delay = Math.min(times * 500, 30000);
