@@ -32,6 +32,22 @@ const logger = require('../../config/logger');
 
 const MLB_API_BASE = 'https://statsapi.mlb.com/api/v1';
 
+// Shared HTTP client for relative-path MLB API calls.
+const mlbHttp = axios.create({
+  baseURL: MLB_API_BASE,
+  timeout: 10000,
+});
+
+// Normalize names for API query + matching (e.g. Dominguez vs Dominguez with accent).
+const normalizeName = (value = '') => String(value)
+  .normalize('NFD')
+  .replace(/[\u0300-\u036f]/g, '')
+  .replace(/[^a-zA-Z0-9 ]/g, ' ')
+  .replace(/\s+/g, ' ')
+  .trim();
+
+const canonicalName = (value = '') => normalizeName(value).toLowerCase();
+
 // In-memory cache — MLBAM IDs never change so cache forever
 const idCache = new Map();
 
@@ -47,7 +63,7 @@ class MLBStatsClient {
    * @returns {Promise<number|null>} MLBAM player ID
    */
   async findPlayerId(playerName) {
-    const norm = playerName.trim().toLowerCase();
+    const norm = canonicalName(playerName);
 
     if (idCache.has(norm)) return idCache.get(norm);
 
@@ -64,7 +80,7 @@ class MLBStatsClient {
       }
 
       // Fallback: search by last name only
-      const parts    = playerName.trim().split(' ');
+      const parts    = normalizeName(playerName).split(' ');
       const lastName = parts[parts.length - 1];
       if (lastName.length >= 3) {
         const fallback = await this._searchByName(lastName);
@@ -85,31 +101,42 @@ class MLBStatsClient {
   }
 
   async _searchByName(name) {
-    // Strip special chars that break MLB API search
-    const clean = name.replace(/[^a-zA-Z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
-    try {
-      const res = await axios.get(`${MLB_API_BASE}/people/search`, {
-        params: { names: clean },
-        timeout: 8000,
-      });
-      return res.data?.people || [];
-    } catch (err) {
-      if (err.response?.status === 404) return [];
-      throw err;
+    // Try both raw and normalized forms to support accents and hyphenated names.
+    const raw = String(name || '').trim();
+    const clean = normalizeName(raw);
+    const candidates = Array.from(new Set([raw, clean].filter(Boolean)));
+
+    for (const q of candidates) {
+      try {
+        const res = await axios.get(`${MLB_API_BASE}/people/search`, {
+          params: { names: q },
+          timeout: 8000,
+        });
+        const people = res.data?.people || [];
+        if (people.length) return people;
+      } catch (err) {
+        if (err.response?.status === 404) continue;
+        throw err;
+      }
     }
+
+    return [];
   }
 
   _bestNameMatch(targetName, people) {
-    const target = targetName.toLowerCase().replace(/[^a-z ]/g, '');
+    const target = canonicalName(targetName);
     for (const p of people) {
-      const full = (p.fullName || '').toLowerCase().replace(/[^a-z ]/g, '');
+      const full = canonicalName(p.fullName || '');
       if (full === target) return p; // exact match
     }
     // Fuzzy: last name match
     const targetLast = target.split(' ').pop();
+    const targetFirst = target.split(' ')[0] || '';
     return people.find(p => {
-      const pLast = (p.fullName || '').toLowerCase().split(' ').pop().replace(/[^a-z]/g, '');
-      return pLast === targetLast;
+      const pTokens = canonicalName(p.fullName || '').split(' ').filter(Boolean);
+      const pFirst = pTokens[0] || '';
+      const pLast = pTokens[pTokens.length - 1] || '';
+      return pLast === targetLast && (!targetFirst || pFirst === targetFirst);
     }) || people[0] || null;
   }
 

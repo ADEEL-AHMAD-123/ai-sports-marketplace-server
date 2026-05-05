@@ -243,6 +243,102 @@ const insightSchema = new mongoose.Schema(
       default: null,
     },
 
+    // ── Flat stat fields used by InsightModal panels ─────────────────────────
+    // These are persisted directly so the frontend can read insight.foo without
+    // descending into aiLog (which is stripped on most read paths).
+    //
+    // Shared
+    formGamesCount:     { type: Number, default: null },
+    edgeGamesCount:     { type: Number, default: null },
+    baselineGamesCount: { type: Number, default: null },
+    formStatAvg:        { type: Number, default: null },
+    focusStatAvg:       { type: Number, default: null },
+    baselineStatAvg:    { type: Number, default: null },
+    isPlayoffGame:      { type: Boolean, default: false },
+    playoffRound:       { type: String,  default: null },
+
+    // NBA
+    formPoints:         { type: Number, default: null },
+    formRebounds:       { type: Number, default: null },
+    formAssists:        { type: Number, default: null },
+    formThrees:         { type: Number, default: null },
+    formPointsAssists:  { type: Number, default: null },
+    formMinutes:        { type: Number, default: null },
+    baselineMinutes:    { type: Number, default: null },
+    trueShootingPct:    { type: Number, default: null },
+    effectiveFGPct:     { type: Number, default: null },
+    approxUSGPct:       { type: Number, default: null },
+
+    // MLB batter
+    hitsPerG:           { type: Number, default: null },
+    tbPerG:             { type: Number, default: null },
+    runsPerG:           { type: Number, default: null },
+    hrPerG:             { type: Number, default: null },
+    rbiPerG:            { type: Number, default: null },
+    battingAvg:         { type: Number, default: null },
+    obp:                { type: Number, default: null },
+    slg:                { type: Number, default: null },
+    ops:                { type: Number, default: null },
+    // MLB pitcher
+    kPerStart:          { type: Number, default: null },
+    ipPerStart:         { type: Number, default: null },
+    era:                { type: Number, default: null },
+    whip:               { type: Number, default: null },
+    k9:                 { type: Number, default: null },
+    formKPerStart:      { type: Number, default: null },
+
+    // NHL skater (per-game averages)
+    goalsPerG:          { type: Number, default: null },
+    assistsPerG:        { type: Number, default: null },
+    pointsPerG:         { type: Number, default: null },
+    shotsPerG:          { type: Number, default: null },
+    toiPerG:            { type: Number, default: null },
+    ppgPerG:            { type: Number, default: null },
+    pmPerG:             { type: Number, default: null },
+    esGoalsPerG:        { type: Number, default: null },
+    ppGoalsPerG:        { type: Number, default: null },
+
+    // NHL — splits + signals (added with playoff/recency upgrades)
+    homeStatAvg:        { type: Number, default: null },
+    awayStatAvg:        { type: Number, default: null },
+    homeGames:          { type: Number, default: null },
+    awayGames:          { type: Number, default: null },
+    h2hStatAvg:         { type: Number, default: null },
+    h2hCount:           { type: Number, default: null },
+    opposingTeamAbbrev: { type: String, default: null },
+    formWindowSize:     { type: Number, default: null },
+
+    // NHL — season composition (mixed playoff/regular)
+    playoffGameCount:   { type: Number, default: null },
+    regularGameCount:   { type: Number, default: null },
+    isMixedSeason:      { type: Boolean, default: false },
+    formMix:            { type: mongoose.Schema.Types.Mixed, default: null },
+    edgeMix:            { type: mongoose.Schema.Types.Mixed, default: null },
+    baselineMix:        { type: mongoose.Schema.Types.Mixed, default: null },
+
+    // NHL — quality flags
+    tooThin:            { type: Boolean, default: false },
+    forceConfidence:    { type: String,  default: null },   // null | 'low'
+    hasInconsistentTOI: { type: Boolean, default: false },
+    toiCV:              { type: Number,  default: null },
+    toiCVThreshold:     { type: Number,  default: null },
+    lineTier:           { type: String,  default: null },
+    position:           { type: String,  default: null },   // 'F' | 'D' | 'G'
+
+    // NHL — scoring profile
+    ppDependencyPct:    { type: Number, default: null },
+    isPPDependent:      { type: Boolean, default: false },
+    shootingPct:        { type: Number, default: null },
+    onGoalStreak:       { type: Boolean, default: false },
+    onGoalSlump:        { type: Boolean, default: false },
+    formGoals:          { type: Number, default: null },
+    edgeGoals:          { type: Number, default: null },
+
+    // NHL — matchup flags surfaced from pipeline
+    isPlayoff:          { type: Boolean, default: false },
+    isBackToBack:       { type: Boolean, default: false },
+    playerTeam:         { type: String, enum: ['home', 'away', null], default: null },
+
     // ── Error tracking ────────────────────────────────────────────────────────
     errorMessage: {
       type: String,

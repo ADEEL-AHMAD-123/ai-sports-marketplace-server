@@ -54,6 +54,15 @@ const playerPropSchema = new mongoose.Schema(
     homeTeamName: { type: String, default: null },
     awayTeamName: { type: String, default: null },
 
+    // 'home' | 'away' | null — resolved via roster lookup at propWatcher time.
+    // Lets InsightPipelines inject opposing-goalie/defense context without
+    // re-resolving the player's team on every insight call.
+    playerTeam: {
+      type: String,
+      enum: ['home', 'away', null],
+      default: null,
+    },
+
     // API-Sports player ID — used to fetch player stats
     apiSportsPlayerId: {
       type: Number,

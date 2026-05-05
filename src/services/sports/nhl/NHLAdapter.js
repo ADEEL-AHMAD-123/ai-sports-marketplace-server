@@ -3,17 +3,13 @@
  *
  * PROPS:   The Odds API (same as NBA/MLB)
  * STATS:   Official NHL Stats API (api-web.nhle.com/v1) via NHLStatsClient
- *          Free, no API key, official source used by NHL.com
- *          Replaces API-Sports Hockey which had no reliable player stat data
  *
  * FLOW:
  *   fetchProps(oddsEventId)     → The Odds API player props
  *   normalizeProp(raw)          → { playerName, statType, line, ... }
- *   fetchPlayerStats({          → NHLStatsClient game log
- *     playerName,
- *     homeTeamName,
- *     awayTeamName,
- *   })
+ *   fetchPlayerStats({ playerName, homeTeamName, awayTeamName })
+ *   resolvePlayerTeam({ playerName, homeTeamName, awayTeamName })
+ *                               → { teamAbbrev, side: 'home'|'away'|null }
  *   applyFormulas(stats, type)  → NHLFormulas processed stats
  *   buildPrompt(params)         → AI prompt with goalie/team context
  */
@@ -43,9 +39,33 @@ const MARKET_TO_STAT = {
   player_points:        'points',
 };
 
+// Bounded LRU-ish set with TTL semantics for "unavailable" event-id logging
+class _BoundedTtlSet {
+  constructor({ max = 2000, ttlMs = 30 * 60_000 } = {}) {
+    this.max = max;
+    this.ttlMs = ttlMs;
+    this.map = new Map(); // key -> expiry timestamp
+  }
+  has(key) {
+    const exp = this.map.get(key);
+    if (!exp) return false;
+    if (exp < Date.now()) { this.map.delete(key); return false; }
+    return true;
+  }
+  add(key) {
+    this.map.set(key, Date.now() + this.ttlMs);
+    if (this.map.size > this.max) {
+      // Drop oldest (Map preserves insertion order)
+      const firstKey = this.map.keys().next().value;
+      this.map.delete(firstKey);
+    }
+  }
+}
+
 class NHLAdapter {
   constructor() {
     this.sport = 'nhl';
+    this._fetchPropsUnavailableLogged = new _BoundedTtlSet({ max: 2000, ttlMs: 30 * 60_000 });
   }
 
   // ── Schedule (The Odds API) ───────────────────────────────────────────────
@@ -70,7 +90,7 @@ class NHLAdapter {
   }
 
   normalizeGame(rawGame) {
-    const { getTeamAbbr, getTeamLogoUrl } = require('../../shared/teamMaps');
+    const { getTeamAbbr, getTeamLogoUrl, getApiSportsLogoUrl } = require('../../shared/teamMaps');
     const home = rawGame.home_team;
     const away = rawGame.away_team;
     return {
@@ -80,12 +100,12 @@ class NHLAdapter {
       homeTeam: {
         name:         home,
         abbreviation: getTeamAbbr('nhl', home) || null,
-        logoUrl:      getTeamLogoUrl('nhl', home) || null,
+        logoUrl:      getTeamLogoUrl('nhl', home) || getApiSportsLogoUrl('nhl', home) || null,
       },
       awayTeam: {
         name:         away,
         abbreviation: getTeamAbbr('nhl', away) || null,
-        logoUrl:      getTeamLogoUrl('nhl', away) || null,
+        logoUrl:      getTeamLogoUrl('nhl', away) || getApiSportsLogoUrl('nhl', away) || null,
       },
       startTime: new Date(rawGame.commence_time),
       status:    'scheduled',
@@ -100,48 +120,60 @@ class NHLAdapter {
       return [];
     }
 
-    const allProps = [];
+    try {
+      const url = `${ODDS_API_BASE}/sports/icehockey_nhl/events/${oddsEventId}/odds`;
+      const params = {
+        apiKey: ODDS_API_KEY,
+        markets: PROP_MARKETS.join(','),
+        regions: 'us',
+        oddsFormat: 'american',
+      };
 
-    for (const market of PROP_MARKETS) {
-      try {
-        const url    = `${ODDS_API_BASE}/sports/icehockey_nhl/events/${oddsEventId}/odds`;
-        const params = {
-          apiKey:   ODDS_API_KEY,
-          markets:  market,
-          regions:  'us',
-          oddsFormat: 'american',
-        };
+      const res = await axios.get(url, { params, timeout: 10_000 });
+      const event = res.data;
+      const allProps = [];
 
-        const res   = await axios.get(url, { params, timeout: 10_000 });
-        const event = res.data;
-
-        // Extract player props from bookmaker markets
-        for (const bm of (event.bookmakers || [])) {
-          for (const mkt of (bm.markets || [])) {
-            if (mkt.key !== market) continue;
-            for (const outcome of (mkt.outcomes || [])) {
-              if (outcome.description && outcome.point != null) {
-                allProps.push({
-                  oddsEventId,
-                  playerName:  outcome.description,
-                  market,
-                  line:        outcome.point,
-                  price:       outcome.price,
-                  bookmaker:   bm.key,
-                  sport:       'nhl',
-                });
-              }
+      for (const bm of (event.bookmakers || [])) {
+        for (const mkt of (bm.markets || [])) {
+          if (!PROP_MARKETS.includes(mkt.key)) continue;
+          for (const outcome of (mkt.outcomes || [])) {
+            if (outcome.description && outcome.point != null) {
+              allProps.push({
+                oddsEventId,
+                playerName: outcome.description,
+                market: mkt.key,
+                line: outcome.point,
+                price: outcome.price,
+                bookmaker: bm.key,
+                sport: 'nhl',
+              });
             }
           }
         }
-
-      } catch (err) {
-        if (err.response?.status === 422) continue; // market not available
-        logger.warn('[NHLAdapter] fetchProps market failed', { market, error: err.message });
       }
-    }
 
-    return allProps;
+      return allProps;
+    } catch (err) {
+      const status = err.response?.status;
+      if (status === 404) {
+        const eventKey = String(oddsEventId || '');
+        if (eventKey && !this._fetchPropsUnavailableLogged.has(eventKey)) {
+          logger.info('[NHLAdapter] fetchProps event unavailable', { oddsEventId: eventKey, status });
+          this._fetchPropsUnavailableLogged.add(eventKey);
+        }
+        return [];
+      }
+      if (status === 422) {
+        logger.info('[NHLAdapter] fetchProps markets unavailable', { oddsEventId, status });
+        return [];
+      }
+      logger.warn('[NHLAdapter] fetchProps failed', {
+        oddsEventId,
+        status: status || null,
+        error: err.message,
+      });
+      return [];
+    }
   }
 
   normalizeProp(rawProp) {
@@ -172,14 +204,11 @@ class NHLAdapter {
   }
 
   async fetchCurrentLine(eventId, playerName, statType) {
-    const marketKey = Object.entries(MARKET_TO_STAT)
-      .find(([, v]) => v === statType)?.[0] || 'player_shots_on_goal';
-
     try {
-      const fakeEvent = { oddsEventId: eventId };
-      const props     = await this.fetchProps(eventId);
-      const match     = props.find(p =>
-        p.playerName?.toLowerCase().trim() === playerName?.toLowerCase().trim() &&
+      const props = await this.fetchProps(eventId);
+      const target = NHLStatsClient.normName(playerName);
+      const match = props.find(p =>
+        NHLStatsClient.normName(p.playerName) === target &&
         MARKET_TO_STAT[p.market] === statType
       );
       return match
@@ -201,12 +230,18 @@ class NHLAdapter {
   async fetchPlayerStats({ playerName, homeTeamName, awayTeamName }) {
     if (!playerName) return [];
 
-    const cacheKey = `nhl:stats:${playerName.toLowerCase().replace(/\s+/g, '_')}`;
+    // Team-aware cache key prevents collisions for same surname on different teams.
+    const teamsKey = [homeTeamName, awayTeamName]
+      .filter(Boolean)
+      .map(NHLStatsClient.getTeamAbbrev)
+      .filter(Boolean)
+      .sort()
+      .join('-') || 'noteam';
+    const cacheKey = `nhl:stats:${teamsKey}:${NHLStatsClient.normName(playerName)}`;
     const cached   = await cacheGet(cacheKey);
     if (cached?.length > 0) return cached;
 
     try {
-      // Step 1: resolve NHL player ID from team rosters
       const playerInfo = await NHLStatsClient.resolvePlayerId(
         playerName,
         homeTeamName,
@@ -218,7 +253,6 @@ class NHLAdapter {
         return [];
       }
 
-      // Step 2: fetch game log
       const log = await NHLStatsClient.getPlayerGameLog(playerInfo.id);
 
       if (!log.length) {
@@ -226,9 +260,13 @@ class NHLAdapter {
         return [];
       }
 
-      // Cache the final result
+      // Decorate the array with the resolved team context (non-enumerable so it
+      // doesn't pollute serialization but consumers can still read it).
+      Object.defineProperty(log, '__teamAbbrev', { value: playerInfo.teamAbbrev || null });
+      Object.defineProperty(log, '__playerInfo', { value: playerInfo });
+
       await cacheSet(cacheKey, log, STATS_CACHE_TTL);
-      logger.info(`[NHLAdapter] Stats fetched: "${playerName}" → ${log.length} games (id=${playerInfo.id})`);
+      logger.info(`[NHLAdapter] Stats: "${playerName}" → ${log.length} games (id=${playerInfo.id}, team=${playerInfo.teamAbbrev || '?'})`);
       return log;
 
     } catch (err) {
@@ -239,10 +277,36 @@ class NHLAdapter {
     }
   }
 
+  /**
+   * Resolve which side ('home' | 'away') a player belongs to.
+   *
+   * @param {{ playerName, homeTeamName, awayTeamName }} params
+   * @returns {Promise<{ side: 'home'|'away'|null, teamAbbrev: string|null, playerInfo: Object|null }>}
+   */
+  async resolvePlayerTeam({ playerName, homeTeamName, awayTeamName }) {
+    if (!playerName) return { side: null, teamAbbrev: null, playerInfo: null };
+    try {
+      const info = await NHLStatsClient.resolvePlayerId(playerName, homeTeamName, awayTeamName);
+      if (!info?.teamAbbrev) return { side: null, teamAbbrev: null, playerInfo: info || null };
+
+      const homeAbbr = NHLStatsClient.getTeamAbbrev(homeTeamName);
+      const awayAbbr = NHLStatsClient.getTeamAbbrev(awayTeamName);
+
+      let side = null;
+      if (info.teamAbbrev === homeAbbr) side = 'home';
+      else if (info.teamAbbrev === awayAbbr) side = 'away';
+
+      return { side, teamAbbrev: info.teamAbbrev, playerInfo: info };
+    } catch (err) {
+      logger.debug('[NHLAdapter] resolvePlayerTeam failed', { playerName, error: err.message });
+      return { side: null, teamAbbrev: null, playerInfo: null };
+    }
+  }
+
   // ── Formulas + Prompt ────────────────────────────────────────────────────
 
   applyFormulas(rawStats, statType, context = {}) {
-    return applyNHLFormulas(rawStats, statType);
+    return applyNHLFormulas(rawStats, statType, context);
   }
 
   buildPrompt(params) {
@@ -255,4 +319,3 @@ class NHLAdapter {
 }
 
 module.exports = NHLAdapter;
-

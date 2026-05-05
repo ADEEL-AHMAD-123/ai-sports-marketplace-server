@@ -1,104 +1,116 @@
 /**
  * NHLInsightPipeline.js — NHL insight context orchestrator
  *
- * Replaces the stub that returned {}.
  * Runs ALL NHL-specific context lookups in parallel:
- *   1. Goalie matchup (opposing goalie save% + tier)
- *   2. Team stats matchup (PP%, shots-for/against, defense quality)
- *   3. Playoff detection (pace adjustment, line tightening)
- *   4. Player's home/away assignment (for goalie + shot context)
+ *   1. Goalie matchup       — opposing goalie season SV% + last-5 form
+ *   2. Team stats matchup   — PP%, PK%, shots-for/against, defense quality
+ *   3. Playoff detection    — pace adjustment, line tightening
+ *   4. Player's home/away   — pulled from prop.playerTeam (set by propWatcher)
+ *                             with roster-lookup fallback
+ *   5. Injury context       — ESPN feed via NHLInjuryService
+ *   6. Back-to-back flag    — opposing team played within last ~30h
  *
  * InsightService calls getInsightContext(prop, game) → returns enriched context
- * that is unpacked and passed to buildNHLPrompt().
- *
- * TO TEST INDEPENDENTLY:
- *   const pipeline = require('./NHLInsightPipeline');
- *   // Simulate a game document
- *   const game = {
- *     homeTeam: { name: 'Boston Bruins', apiSportsId: 1 },
- *     awayTeam: { name: 'Toronto Maple Leafs', apiSportsId: 2 },
- *     startTime: new Date(),
- *   };
- *   const ctx = await pipeline.getInsightContext({ playerName: 'Brad Marchand', statType: 'goals' }, game);
- *   console.log(JSON.stringify(ctx, null, 2));
+ * unpacked and passed to buildNHLPrompt().
  */
 
 const NHLGoalieService    = require('./NHLGoalieService');
 const NHLTeamStatsService = require('./NHLTeamStatsService');
+const NHLInjuryService    = require('./NHLInjuryService');
+const NHLStatsClient      = require('./NHLStatsClient');
 const logger              = require('../../../config/logger');
 
 /**
  * Determine if a player is on the home or away team.
- * Uses homeTeamName/awayTeamName stored on the prop (set by propWatcher).
- * Falls back to null if unknown — goalie context still injected, just without home/away.
+ * Order of precedence:
+ *   1. prop.playerTeam (already set by propWatcher)
+ *   2. roster lookup against home + away rosters
  *
- * @param {Object} prop  — { homeTeamName, awayTeamName, playerTeam }
- * @param {Object} game
- * @returns {'home' | 'away' | null}
+ * @returns {Promise<'home'|'away'|null>}
  */
-function _resolvePlayerSide(prop, game) {
-  // propWatcher stores homeTeamName/awayTeamName on each prop
-  if (prop.playerTeam === 'home') return 'home';
-  if (prop.playerTeam === 'away') return 'away';
-
-  // Fallback: check if we have it from the prop's stored team name
-  if (prop.homeTeamName && prop.awayTeamName) {
-    // If playerName is not tied to a team, we can't determine side
-    return null;
+async function _resolvePlayerSide(prop, game) {
+  if (prop?.playerTeam === 'home' || prop?.playerTeam === 'away') {
+    return prop.playerTeam;
   }
 
+  const homeName = prop?.homeTeamName || game?.homeTeam?.name;
+  const awayName = prop?.awayTeamName || game?.awayTeam?.name;
+  if (!homeName || !awayName) return null;
+
+  try {
+    const info = await NHLStatsClient.resolvePlayerId(prop.playerName, homeName, awayName);
+    if (!info?.teamAbbrev) return null;
+
+    const homeAbbr = NHLStatsClient.getTeamAbbrev(homeName);
+    const awayAbbr = NHLStatsClient.getTeamAbbrev(awayName);
+    if (info.teamAbbrev === homeAbbr) return 'home';
+    if (info.teamAbbrev === awayAbbr) return 'away';
+  } catch (err) {
+    logger.debug('[NHLInsightPipeline] _resolvePlayerSide failed', { error: err.message });
+  }
   return null;
 }
 
 /**
- * @param {{ statType, playerName, homeTeamName, awayTeamName, playerTeam }} prop
- * @param {Object} game — Game document (lean)
  * @returns {Promise<{
- *   goalieContext:  { homeGoalie, awayGoalie } | null,
- *   teamContext:   { home, away, playoff, expectedPace } | null,
- *   playerSide:    'home' | 'away' | null,
- *   isPlayoff:     boolean,
+ *   goalieContext, teamContext, playerSide, isPlayoff, injuryContext, isBackToBack
  * }>}
  */
 async function getInsightContext(prop, game) {
   if (!game) return _empty();
 
-  const playerSide = _resolvePlayerSide(prop, game);
+  const playerSide = await _resolvePlayerSide(prop, game);
 
-  // Run all lookups in parallel — none depend on each other
-  const [goalieResult, teamResult] = await Promise.allSettled([
+  const teamCtx = {
+    homeTeamName: game.homeTeam?.name,
+    awayTeamName: game.awayTeam?.name,
+    oddsEventId:  game.oddsEventId,
+  };
+
+  // All lookups in parallel
+  const [goalieResult, teamResult, injuryResult] = await Promise.allSettled([
     NHLGoalieService.getGoalieContext(game),
     NHLTeamStatsService.getTeamMatchupContext(game),
+    NHLInjuryService.getInjuryPromptContext(prop?.playerName, teamCtx),
   ]);
 
-  const goalieContext = goalieResult.status === 'fulfilled' ? goalieResult.value : null;
-  const teamContext   = teamResult.status   === 'fulfilled' ? teamResult.value   : null;
+  const goalieContext  = goalieResult.status  === 'fulfilled' ? goalieResult.value  : null;
+  const teamContext    = teamResult.status    === 'fulfilled' ? teamResult.value    : null;
+  const injuryContext  = injuryResult.status  === 'fulfilled' ? injuryResult.value  : null;
 
   if (goalieResult.status === 'rejected') {
-    logger.warn('[NHLInsightPipeline] Goalie context failed (non-fatal)', {
-      error: goalieResult.reason?.message,
-    });
+    logger.warn('[NHLInsightPipeline] Goalie context failed (non-fatal)', { error: goalieResult.reason?.message });
   }
   if (teamResult.status === 'rejected') {
-    logger.warn('[NHLInsightPipeline] Team context failed (non-fatal)', {
-      error: teamResult.reason?.message,
-    });
+    logger.warn('[NHLInsightPipeline] Team context failed (non-fatal)', { error: teamResult.reason?.message });
   }
 
   const isPlayoff = teamContext?.playoff?.isPlayoff ?? false;
+
+  // Back-to-back detection runs against the Game collection — inexpensive lookup.
+  const isBackToBack = playerSide
+    ? await NHLGoalieService.detectBackToBack(game, playerSide).catch(() => false)
+    : false;
 
   return {
     goalieContext,
     teamContext,
     playerSide,
     isPlayoff,
+    injuryContext,
+    isBackToBack,
   };
 }
 
 function _empty() {
-  return { goalieContext: null, teamContext: null, playerSide: null, isPlayoff: false };
+  return {
+    goalieContext: null,
+    teamContext:   null,
+    playerSide:    null,
+    isPlayoff:     false,
+    injuryContext: null,
+    isBackToBack:  false,
+  };
 }
 
 module.exports = { getInsightContext };
-
- 

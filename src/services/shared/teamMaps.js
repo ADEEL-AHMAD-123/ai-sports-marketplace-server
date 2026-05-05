@@ -153,8 +153,10 @@ const getTeamAbbr = (sport, name) => {
 const getTeamLogoUrl = (sport, name) => {
   const team = TEAM_MAPS[sport]?.[name];
   if (!team) return null;
-  const sportPath = { nba: 'nba', mlb: 'mlb', nhl: 'hockey', nfl: 'nfl' }[sport] || sport;
-  return `https://a.espncdn.com/i/teamlogos/${sportPath}/500/${team.espn}.png`;
+  const espnCode = team.espn || team.abbr;   // NHL entries only have abbr
+  if (!espnCode) return null;
+  const sportPath = { nba: 'nba', mlb: 'mlb', nhl: 'nhl', nfl: 'nfl' }[sport] || sport;
+  return `https://a.espncdn.com/i/teamlogos/${sportPath}/500/${espnCode}.png`;
 };
 
 /**

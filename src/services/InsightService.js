@@ -138,10 +138,31 @@ class InsightService {
     }
 
     // ── STEP 4: Apply formulas ─────────────────────────────────────────────
-    const processedStats = adapter.applyFormulas(
-      rawStats, statType,
-      { isPitcher: statType === 'pitcher_strikeouts' }
-    );
+    // For NHL, derive opposing team abbrev + player position so head-to-head,
+    // home/away splits, and position-aware TOI thresholds compute correctly.
+    let formulaContext = { isPitcher: statType === 'pitcher_strikeouts' };
+    if (sport === 'nhl') {
+      try {
+        const NHLStatsClient = require('./sports/nhl/NHLStatsClient');
+        const playerTeam     = prop?.playerTeam || null;       // 'home' | 'away' | null
+        let opposingTeamName = null;
+        if (playerTeam === 'home')      opposingTeamName = prop?.awayTeamName;
+        else if (playerTeam === 'away') opposingTeamName = prop?.homeTeamName;
+        const opposingTeamAbbrev = opposingTeamName
+          ? NHLStatsClient.getTeamAbbrev(opposingTeamName)
+          : null;
+        const position = rawStats?.__playerInfo?.position || null;
+        formulaContext = {
+          ...formulaContext,
+          opposingTeamAbbrev,
+          playerSide: playerTeam,
+          position,
+        };
+      } catch (e) {
+        logger.debug('[InsightService] NHL formula context derive failed (non-fatal)', { error: e.message });
+      }
+    }
+    const processedStats = adapter.applyFormulas(rawStats, statType, formulaContext);
     logger.debug('📐 [InsightService] Formulas applied', logCtx);
 
     // ── STEP 5: Injury context ─────────────────────────────────────────────
@@ -201,6 +222,7 @@ class InsightService {
     const teamContext        = sportCtx.teamContext      || null;
     const playerSide         = sportCtx.playerSide       || null;
     const isPlayoff          = sportCtx.isPlayoff        || false;
+    const isBackToBack       = sportCtx.isBackToBack     || false;
 
     // ── STEP 7: Build AI prompt ────────────────────────────────────────────
     const prompt = adapter.buildPrompt({
@@ -220,6 +242,7 @@ class InsightService {
       teamContext,                         // NHL: PP%, shots-for/against, defense quality
       playerSide,                          // NHL: 'home' | 'away' for goalie assignment
       isPlayoff,                           // NHL: playoff pace adjustment
+      isBackToBack,                        // NHL: opposing team on second half of B2B
     });
     logger.debug('📝 [InsightService] Prompt built', { ...logCtx, promptLength: prompt.length });
 
@@ -292,15 +315,54 @@ class InsightService {
       whip:               processedStats?.whip              ?? null,
       k9:                 processedStats?.k9                ?? null,
       formKPerStart:      processedStats?.formKPerStart     ?? null,
-      // NHL skater fields
+      // NHL skater fields — per-game averages
       goalsPerG:          processedStats?.goalsPerG          ?? null,
       assistsPerG:        processedStats?.assistsPerG        ?? null,
       pointsPerG:         processedStats?.pointsPerG         ?? null,
       shotsPerG:          processedStats?.shotsPerG          ?? null,
       toiPerG:            processedStats?.toiPerG            ?? null,
-      formStatAvg:        processedStats?.formStatAvg        ?? null,
-      // Session 1: store playoff context on insight
-      isPlayoffGame:     gameContextData?.isPlayoff ?? false,
+      ppgPerG:            processedStats?.ppgPerG            ?? null,
+      pmPerG:             processedStats?.pmPerG             ?? null,
+      esGoalsPerG:        processedStats?.esGoalsPerG        ?? null,
+      ppGoalsPerG:        processedStats?.ppGoalsPerG        ?? null,
+      // NHL — splits
+      homeStatAvg:        processedStats?.homeStatAvg        ?? null,
+      awayStatAvg:        processedStats?.awayStatAvg        ?? null,
+      homeGames:          processedStats?.homeGames          ?? null,
+      awayGames:          processedStats?.awayGames          ?? null,
+      h2hStatAvg:         processedStats?.h2hStatAvg         ?? null,
+      h2hCount:           processedStats?.h2hCount           ?? null,
+      opposingTeamAbbrev: processedStats?.opposingTeamAbbrev ?? null,
+      formWindowSize:     processedStats?.formWindowSize     ?? null,
+      // NHL — season composition (playoff blending)
+      playoffGameCount:   processedStats?.playoffGameCount   ?? null,
+      regularGameCount:   processedStats?.regularGameCount   ?? null,
+      isMixedSeason:      processedStats?.isMixedSeason      ?? false,
+      formMix:            processedStats?.formMix            ?? null,
+      edgeMix:            processedStats?.edgeMix            ?? null,
+      baselineMix:        processedStats?.baselineMix        ?? null,
+      // NHL — quality flags
+      tooThin:            processedStats?.tooThin            ?? false,
+      forceConfidence:    processedStats?.forceConfidence    ?? null,
+      hasInconsistentTOI: processedStats?.hasInconsistentTOI ?? false,
+      toiCV:              processedStats?.toiCV              ?? null,
+      toiCVThreshold:     processedStats?.toiCVThreshold     ?? null,
+      lineTier:           processedStats?.lineTier           ?? null,
+      position:           processedStats?.position           ?? null,
+      // NHL — scoring profile
+      ppDependencyPct:    processedStats?.ppDependencyPct    ?? null,
+      isPPDependent:      processedStats?.isPPDependent      ?? false,
+      shootingPct:        processedStats?.shootingPct        ?? null,
+      onGoalStreak:       processedStats?.onGoalStreak       ?? false,
+      onGoalSlump:        processedStats?.onGoalSlump        ?? false,
+      formGoals:          processedStats?.formGoals          ?? null,
+      edgeGoals:          processedStats?.edgeGoals          ?? null,
+      // NHL — matchup flags from pipeline
+      isPlayoff:          (sport === 'nhl' ? (sportCtx?.isPlayoff ?? false) : false),
+      isBackToBack:       (sport === 'nhl' ? (sportCtx?.isBackToBack ?? false) : false),
+      playerTeam:         (sport === 'nhl' ? (sportCtx?.playerSide ?? prop?.playerTeam ?? null) : null),
+      // Session 1: store playoff context on insight (NBA flag — kept for back-compat)
+      isPlayoffGame:     gameContextData?.isPlayoff ?? (sport === 'nhl' ? (sportCtx?.isPlayoff ?? false) : false),
       playoffRound:      gameContextData?.round ?? null,
       confidenceScore,
       edgePercentage,
@@ -308,6 +370,9 @@ class InsightService {
       isBestValue,
       status: INSIGHT_STATUS.GENERATED,
       oddsSnapshot: { line: preflight.currentLine, fetchedAt: new Date() },
+      // ── Game-personalization payload (read by InsightModal sub-blocks) ───
+      // Survives every read path (controllers strip aiLog, not leagueContext).
+      leagueContext: this._buildLeagueContext({ sport, prop, game, sportCtx }),
       aiLog: {
         prompt,
         rawResponse:    aiResponse.text,
@@ -327,6 +392,117 @@ class InsightService {
     await this._deductCredit({ user, insight, logCtx });
 
     return { insight: insight.toObject(), creditDeducted: true };
+  }
+
+  // ─── Game-personalization payload ──────────────────────────────────────────
+  // Builds Insight.leagueContext — the structured per-game payload the
+  // frontend modal uses to render opponent / venue / matchup specifics.
+  // Sport-aware; safe to call with partial inputs.
+  _buildLeagueContext({ sport, prop, game, sportCtx }) {
+    if (!game) return null;
+    const playerSide   = sportCtx?.playerSide || prop?.playerTeam || null;
+    const homeName     = game.homeTeam?.name || null;
+    const awayName     = game.awayTeam?.name || null;
+    const homeAbbr     = game.homeTeam?.abbreviation || null;
+    const awayAbbr     = game.awayTeam?.abbreviation || null;
+    const opponentName = playerSide === 'home' ? awayName
+                       : playerSide === 'away' ? homeName : null;
+    const opponentAbbr = playerSide === 'home' ? awayAbbr
+                       : playerSide === 'away' ? homeAbbr : null;
+
+    const base = {
+      sport,
+      gameStartTime:   game.startTime || null,
+      homeTeam:        homeName,
+      awayTeam:        awayName,
+      homeAbbr,
+      awayAbbr,
+      playerSide,                                  // 'home' | 'away' | null
+      venue:           playerSide === 'home' ? 'home' : playerSide === 'away' ? 'away' : null,
+      opponentName,
+      opponentAbbr,
+    };
+
+    if (sport === 'nhl') {
+      const goalie = sportCtx?.goalieContext
+        ? (playerSide === 'home' ? sportCtx.goalieContext.awayGoalie : sportCtx.goalieContext.homeGoalie)
+        : null;
+      const team = sportCtx?.teamContext || null;
+      const oppTeamStats = team ? (playerSide === 'home' ? team.away : team.home) : null;
+      return {
+        ...base,
+        isPlayoff:    !!sportCtx?.isPlayoff,
+        isBackToBack: !!sportCtx?.isBackToBack,
+        goalie: goalie ? {
+          name:            goalie.name || null,
+          tier:            goalie.tier || null,
+          seasonTier:      goalie.seasonTier || null,
+          savePercentage:  goalie.savePercentage ?? null,
+          goalsAgainstAvg: goalie.goalsAgainstAvg ?? null,
+          gamesPlayed:     goalie.gamesPlayed ?? null,
+          recentSavePct:   goalie.recentForm?.recentSavePct ?? null,
+          recentStarts:    goalie.recentForm?.startsCount ?? null,
+          isHot:           !!goalie.recentForm?.isHot,
+          isCold:          !!goalie.recentForm?.isCold,
+        } : null,
+        oppTeam: oppTeamStats ? {
+          ppPct:               oppTeamStats.ppPct ?? null,
+          pkPct:               oppTeamStats.pkPct ?? null,
+          shotsAgainstPerGame: oppTeamStats.shotsAgainstPerGame ?? null,
+          goalsAgainstPerGame: oppTeamStats.goalsAgainstPerGame ?? null,
+        } : null,
+        expectedShots: team?.expectedPace
+          ? (playerSide === 'home' ? team.expectedPace.homeExpectedShots : team.expectedPace.awayExpectedShots)
+          : null,
+      };
+    }
+
+    if (sport === 'nba') {
+      const def = sportCtx?.defensiveContext || null;
+      const oppDef = def
+        ? (playerSide === 'home' ? def.awayTeamDef : def.homeTeamDef)
+        : null;
+      return {
+        ...base,
+        isPlayoff:  !!sportCtx?.gameContext?.isPlayoff,
+        round:      sportCtx?.gameContext?.round || null,
+        gameNumber: sportCtx?.gameContext?.gameNumber || null,
+        oppDefense: oppDef ? {
+          pointsAllowedPG:   oppDef.pointsAllowedPG ?? null,
+          threesAllowedPG:   oppDef.threesAllowedPG ?? null,
+          reboundsAllowedPG: oppDef.reboundsAllowedPG ?? null,
+          gamesPlayed:       oppDef.gamesPlayed ?? null,
+          teamName:          oppDef.teamName || null,
+        } : null,
+      };
+    }
+
+    if (sport === 'mlb') {
+      const starter = sportCtx?.starterContext?.starterStats || null;
+      return {
+        ...base,
+        starter: sportCtx?.starterContext ? {
+          name:  sportCtx.starterContext.starterName || null,
+          hand:  starter?.hand || starter?.handedness || null,
+          era:   starter?.era ?? null,
+          whip:  starter?.whip ?? null,
+          k9:    starter?.k9 ?? null,
+        } : null,
+        ballpark: sportCtx?.parkContext ? {
+          homeTeamName: sportCtx.parkContext.homeTeamName,
+        } : null,
+        platoon: sportCtx?.platoonContext?.matchup
+          ? {
+              batterHand:  sportCtx.platoonContext.matchup.batterHand  || null,
+              pitcherHand: sportCtx.platoonContext.matchup.pitcherHand || null,
+              edge:        sportCtx.platoonContext.matchup.edge        || null,
+              note:        sportCtx.platoonContext.matchup.note        || null,
+            }
+          : null,
+      };
+    }
+
+    return base;
   }
 
   // ─── Pre-flight ────────────────────────────────────────────────────────────

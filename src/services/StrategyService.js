@@ -7,6 +7,7 @@
  * DATA SOURCES:
  *  NBA → API-Sports NBA v2 game logs (requires apiSportsPlayerId on prop)
  *  MLB → Official MLB Stats API (statsapi.mlb.com, lookup by playerName)
+ *  NHL → Official NHL Stats API (api-web.nhle.com, lookup by player/team names)
  *
  * CONFIDENCE FORMULA (game log available):
  *  Weighted hit rate over the form window (last 5-8 games).
@@ -92,6 +93,12 @@ class StrategyService {
             playerName: prop.playerName,
             isPitcher:  prop.isPitcher || prop.statType === 'pitcher_strikeouts',
           });
+        } else if (sport === 'nhl') {
+          stats = await adapter.fetchPlayerStats({
+            playerName: prop.playerName,
+            homeTeamName: prop.homeTeamName,
+            awayTeamName: prop.awayTeamName,
+          });
         } else if (prop.apiSportsPlayerId) {
           stats = await adapter.fetchPlayerStats({ playerId: prop.apiSportsPlayerId });
         }
@@ -158,10 +165,12 @@ class StrategyService {
 
   _computeScores(processedStats, bettingLine, context = {}) {
     const { recentStatValues = [], focusStatAvg = 0 } = processedStats || {};
-    const focusAvgNum = parseFloat(focusStatAvg) || 0;
+    const parsedFocus = parseFloat(focusStatAvg);
+    const hasFocusAvg = Number.isFinite(parsedFocus);
+    const focusAvgNum = hasFocusAvg ? parsedFocus : 0;
 
     // Edge percentage
-    const rawEdge = bettingLine > 0 && focusAvgNum > 0
+    const rawEdge = bettingLine > 0 && hasFocusAvg
       ? ((focusAvgNum - bettingLine) / bettingLine) * 100
       : 0;
     const edgePercentage = isNaN(rawEdge) ? 0 : parseFloat(rawEdge.toFixed(2));
@@ -190,15 +199,15 @@ class StrategyService {
     return {
       confidenceScore,
       edgePercentage,
-      aiPredictedValue: focusAvgNum || null,
+      aiPredictedValue: hasFocusAvg ? focusAvgNum : null,
       isHighConfidence:  confidenceScore >= HC_THRESHOLD,
       isBestValue:       absEdge >= getMinEdgeForStat(context?.sport, context?.statType),
     };
   }
 
   _computeEdgeOnlyScores(bettingLine, focusStatAvg, context = {}) {
-    const avg = parseFloat(focusStatAvg) || 0;
-    if (!avg || !bettingLine) return null;
+    const avg = parseFloat(focusStatAvg);
+    if (!Number.isFinite(avg) || !bettingLine) return null;
 
     const rawEdge        = ((avg - bettingLine) / bettingLine) * 100;
     const edgePercentage = parseFloat(rawEdge.toFixed(2));

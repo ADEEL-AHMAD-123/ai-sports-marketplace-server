@@ -11,6 +11,8 @@
 jest.mock('../../src/models/Insight.model', () => ({
   find: jest.fn(),
   bulkWrite: jest.fn(),
+  countDocuments: jest.fn().mockResolvedValue(0),
+  updateMany: jest.fn().mockResolvedValue({ modifiedCount: 0 }),
 }));
 jest.mock('../../src/models/Game.model', () => ({
   Game: { find: jest.fn(), findOne: jest.fn(), updateMany: jest.fn(), deleteMany: jest.fn(), countDocuments: jest.fn() },
@@ -25,12 +27,27 @@ jest.mock('../../src/services/shared/adapterRegistry', () => ({
   getAdapter: jest.fn(),
 }));
 jest.mock('../../src/config/redis', () => ({
-  cacheDel: jest.fn().mockResolvedValue(null),
+  cacheDel:   jest.fn().mockResolvedValue(null),
+  cacheClear: jest.fn().mockResolvedValue(0),
 }));
 jest.mock('../../src/config/logger', () => ({
   info: jest.fn(),
   warn: jest.fn(),
   error: jest.fn(),
+  debug: jest.fn(),
+}));
+// PlayerCache (new in InsightOutcomeService — fallback for deleted props)
+jest.mock('../../src/utils/playerResolver', () => ({
+  PlayerCache: {
+    find: jest.fn().mockReturnValue({ lean: jest.fn().mockResolvedValue([]) }),
+  },
+  resolvePlayerId:      jest.fn().mockResolvedValue(null),
+  bulkResolvePlayerIds: jest.fn().mockResolvedValue({}),
+}));
+// PlayerStatsSnapshotService (used by nba/postGameSync.js in integration test)
+jest.mock('../../src/services/PlayerStatsSnapshotService', () => ({
+  markSportSnapshotsStale: jest.fn().mockResolvedValue(undefined),
+  getPlayerStats:          jest.fn().mockResolvedValue([]),
 }));
 
 const Insight    = require('../../src/models/Insight.model');
@@ -419,7 +436,7 @@ describe('postGameSync — FINAL transition triggers outcome grading', () => {
     PlayerProp.updateMany.mockResolvedValue({ modifiedCount: 0 });
 
     const { runPostGameSync } = require('../../src/jobs/orchestrators/postGameSync.job.js');
-    await runPostGameSync();
+    await runPostGameSync('nba'); // run only nba — avoids parallel-sport mock interference
 
     expect(spy).toHaveBeenCalledWith(expect.arrayContaining(['evt_live_abc']));
     spy.mockRestore();

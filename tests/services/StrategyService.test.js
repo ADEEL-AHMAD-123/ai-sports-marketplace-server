@@ -21,11 +21,18 @@ const { getAdapter } = require('../../src/services/shared/adapterRegistry');
 const StrategyService = require('../../src/services/StrategyService');
 
 describe('StrategyService', () => {
+  const mockStats = [
+    { points: 31 }, { points: 29 }, { points: 27 },
+    { points: 33 }, { points: 25 }, { points: 26 },
+    { points: 30 }, { points: 28 },
+  ];
+
   const mockAdapter = {
     applyFormulas: jest.fn().mockReturnValue({
       recentStatValues: [30, 28, 27, 31, 26],
       focusStatAvg: 28.4,
     }),
+    fetchPlayerStats: jest.fn().mockResolvedValue(mockStats),
   };
 
   beforeEach(() => {
@@ -67,43 +74,14 @@ describe('StrategyService', () => {
     PlayerProp.find.mockReturnValue({
       lean: jest.fn().mockResolvedValue(props),
     });
-    PlayerStatsSnapshotService.getPlayerStats
-      .mockResolvedValueOnce([
-        { points: 31 },
-        { points: 29 },
-        { points: 27 },
-        { points: 33 },
-        { points: 25 },
-        { points: 26 },
-        { points: 30 },
-        { points: 28 },
-      ])
-      .mockResolvedValueOnce([
-        { threes: 5 },
-        { threes: 6 },
-        { threes: 4 },
-        { threes: 7 },
-        { threes: 5 },
-        { threes: 4 },
-        { threes: 6 },
-        { threes: 5 },
-      ]);
 
     const result = await StrategyService.scoreAllPropsForSport('nba');
 
-    expect(PlayerStatsSnapshotService.getPlayerStats).toHaveBeenCalledTimes(2);
-    expect(PlayerStatsSnapshotService.getPlayerStats).toHaveBeenNthCalledWith(1, {
-      sport: 'nba',
-      playerName: 'LeBron James',
-      playerId: 2544,
-      isPitcher: false,
-    });
-    expect(PlayerStatsSnapshotService.getPlayerStats).toHaveBeenNthCalledWith(2, {
-      sport: 'nba',
-      playerName: 'Stephen Curry',
-      playerId: 115,
-      isPitcher: false,
-    });
+    // New behaviour: adapter.fetchPlayerStats called once per prop (not deduplicated at this layer).
+    // LeBron has 2 props (points + assists) → 2 calls; Curry has 1 → 1 call = 3 total.
+    expect(mockAdapter.fetchPlayerStats).toHaveBeenCalledTimes(3);
+    expect(mockAdapter.fetchPlayerStats).toHaveBeenCalledWith({ playerId: 2544 });
+    expect(mockAdapter.fetchPlayerStats).toHaveBeenCalledWith({ playerId: 115 });
     expect(result).toEqual(expect.objectContaining({ failed: 0 }));
   });
 });

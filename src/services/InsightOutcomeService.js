@@ -512,13 +512,9 @@ class InsightOutcomeService {
     }
 
     if (insight.sport === 'nhl') {
-      const cacheKey = `nhl::${insight.playerName}`;
-      if (!statsCache.has(cacheKey)) {
-        statsCache.set(cacheKey, await adapter.fetchPlayerStats({
-          playerName: insight.playerName,
-        }) || []);
-      }
-      const stats = statsCache.get(cacheKey) || [];
+      // Delegate to NHLOutcomeGrader so team-context resolution stays in one place.
+      const NHLOutcomeGrader = require('./sports/nhl/NHLOutcomeGrader');
+      const stats = await NHLOutcomeGrader.fetchStatsForInsight(insight, statsCache) || [];
       return {
         stats,
         reason: stats.length ? null : 'no_stat_found',

@@ -131,11 +131,11 @@ const LEAGUE_PROFILES = {
       highConfidenceThreshold: 57,
       minEdgePercentage: 15,
       minGamesByStatType: {
-        shots_on_goal: 8,
-        goals:         10, // high variance — need more history
-        assists:       10,
-        points:        10,
-        default:       8,
+        shots_on_goal: 6,
+        goals:         7, // high variance — keep stricter than SOG
+        assists:       7,
+        points:        7,
+        default:       6,
       },
       confidence: {
         maxWeight:              1.4,

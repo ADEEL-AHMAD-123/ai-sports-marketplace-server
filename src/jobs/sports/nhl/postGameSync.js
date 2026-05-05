@@ -17,7 +17,7 @@ const Insight                    = require('../../../models/Insight.model');
 const InsightOutcomeService      = require('../../../services/InsightOutcomeService');
 const PlayerStatsSnapshotService = require('../../../services/PlayerStatsSnapshotService');
 const { getAdapter }             = require('../../../services/shared/adapterRegistry');
-const { cacheDel }               = require('../../../config/redis');
+const { cacheDel, cacheClear }   = require('../../../config/redis');
 const logger                     = require('../../../config/logger');
 
 const SPORT = 'nhl';
@@ -70,6 +70,22 @@ async function run() {
   if (toFinal.length) {
     await Game.updateMany({ _id: { $in: toFinal.map(g => g._id) } }, { $set: { status: GAME_STATUS.FINAL } });
     await PlayerProp.updateMany({ gameId: { $in: toFinal.map(g => g._id) } }, { $set: { isAvailable: false } });
+
+    // Invalidate NHL stat caches BEFORE grading so the grader fetches fresh logs
+    // that include the just-finalized game(s). The TTL is 4h on game-logs, but
+    // for grading we need same-cycle freshness.
+    try {
+      await Promise.all([
+        cacheClear('nhl:gamelog:*'),
+        cacheClear('nhl:stats:*'),
+        cacheClear('nhl:teamstats:*'),
+        cacheClear('nhl:goalie:*'),
+        cacheClear('nhl:goaliegamelog:*'),
+      ]);
+      logger.debug(`[${SPORT}PostGameSync] Stat caches invalidated for ${toFinal.length} finalized game(s)`);
+    } catch (e) {
+      logger.warn(`[${SPORT}PostGameSync] Cache invalidation failed (non-fatal)`, { error: e.message });
+    }
 
     const finalEventIds = toFinal.map(g => g.oddsEventId).filter(Boolean);
     const outcomeResult = await InsightOutcomeService.persistOutcomesForEvents(finalEventIds);
