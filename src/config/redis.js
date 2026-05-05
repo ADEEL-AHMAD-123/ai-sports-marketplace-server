@@ -18,6 +18,9 @@
 const Redis = require('ioredis');
 const logger = require('./logger');
 
+// ─── Redis enabled flag ───────────────────────────────────────────────────────
+const REDIS_ENABLED = process.env.REDIS_ENABLED !== 'false';
+
 // ─── Build connection config from env ────────────────────────────────────────
 const redisConfig = {
   host: process.env.REDIS_HOST || '127.0.0.1',
@@ -40,34 +43,38 @@ if (process.env.REDIS_PASSWORD) {
   redisConfig.password = process.env.REDIS_PASSWORD;
 }
 
-// ─── Create singleton client ──────────────────────────────────────────────────
-const redisClient = new Redis(redisConfig);
+// ─── Create singleton client (or null stub when disabled) ────────────────────
+const redisClient = REDIS_ENABLED ? new Redis(redisConfig) : null;
 
-// ─── Connection event logging ─────────────────────────────────────────────────
-redisClient.on('connect', () => {
-  logger.info('✅ Redis connecting...');
-});
-
-redisClient.on('ready', () => {
-  logger.info('✅ Redis ready.', {
-    host: process.env.REDIS_HOST,
-    port: process.env.REDIS_PORT,
-    db: process.env.REDIS_DB,
+if (REDIS_ENABLED) {
+  // ─── Connection event logging ───────────────────────────────────────────────
+  redisClient.on('connect', () => {
+    logger.info('✅ Redis connecting...');
   });
-});
 
-redisClient.on('error', (err) => {
-  // Log but don't crash — app can run with degraded caching if Redis is down
-  logger.error('❌ Redis error', { error: err.message });
-});
+  redisClient.on('ready', () => {
+    logger.info('✅ Redis ready.', {
+      host: process.env.REDIS_HOST,
+      port: process.env.REDIS_PORT,
+      db: process.env.REDIS_DB,
+    });
+  });
 
-redisClient.on('close', () => {
-  logger.warn('⚠️  Redis connection closed.');
-});
+  redisClient.on('error', (err) => {
+    // Log but don't crash — app can run with degraded caching if Redis is down
+    logger.error('❌ Redis error', { error: err.message });
+  });
 
-redisClient.on('reconnecting', () => {
-  logger.info('🔄 Redis reconnecting...');
-});
+  redisClient.on('close', () => {
+    logger.warn('⚠️  Redis connection closed.');
+  });
+
+  redisClient.on('reconnecting', () => {
+    logger.info('🔄 Redis reconnecting...');
+  });
+} else {
+  logger.warn('⚠️  Redis is disabled (REDIS_ENABLED=false). All cache calls are no-ops.');
+}
 
 // ─── Helper wrappers ──────────────────────────────────────────────────────────
 
@@ -80,6 +87,7 @@ redisClient.on('reconnecting', () => {
  * @returns {Promise<any|null>}
  */
 const cacheGet = async (key) => {
+  if (!REDIS_ENABLED) return null;
   try {
     const value = await redisClient.get(key);
     if (value === null) return null;
@@ -106,6 +114,7 @@ const cacheGet = async (key) => {
  * @returns {Promise<boolean>} - true on success
  */
 const cacheSet = async (key, value, ttl) => {
+  if (!REDIS_ENABLED) return false;
   try {
     const serialized = typeof value === 'string' ? value : JSON.stringify(value);
 
@@ -130,6 +139,7 @@ const cacheSet = async (key, value, ttl) => {
  * @returns {Promise<number>} - number of keys deleted
  */
 const cacheDel = async (...keys) => {
+  if (!REDIS_ENABLED) return 0;
   try {
     const count = await redisClient.del(...keys);
     logger.debug('🗑️  Redis DEL', { keys, deletedCount: count });
@@ -147,6 +157,7 @@ const cacheDel = async (...keys) => {
  * @returns {Promise<boolean>}
  */
 const cacheExists = async (key) => {
+  if (!REDIS_ENABLED) return false;
   try {
     const count = await redisClient.exists(key);
     return count > 0;
@@ -165,6 +176,7 @@ const cacheExists = async (key) => {
  * @returns {Promise<number>} - number of keys deleted
  */
 const cacheClear = async (pattern) => {
+  if (!REDIS_ENABLED) return 0;
   try {
     let cursor = '0';
     let totalDeleted = 0;
@@ -190,12 +202,12 @@ const cacheClear = async (pattern) => {
 
 // ─── Graceful shutdown ────────────────────────────────────────────────────────
 process.on('SIGINT', async () => {
-  await redisClient.quit();
+  if (redisClient) await redisClient.quit();
   logger.info('✅ Redis connection closed on SIGINT.');
 });
 
 process.on('SIGTERM', async () => {
-  await redisClient.quit();
+  if (redisClient) await redisClient.quit();
   logger.info('✅ Redis connection closed on SIGTERM.');
 });
 
