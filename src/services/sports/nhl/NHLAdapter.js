@@ -133,23 +133,43 @@ class NHLAdapter {
       const event = res.data;
       const allProps = [];
 
+      // The Odds API returns two outcomes per (player, market, line): one Over,
+      // one Under, each with its own price. Group them so we can emit one prop
+      // per player/market with both overOdds and underOdds populated.
       for (const bm of (event.bookmakers || [])) {
         for (const mkt of (bm.markets || [])) {
           if (!PROP_MARKETS.includes(mkt.key)) continue;
+
+          // Key by (player, market, line) — a player may have multiple lines per market
+          const grouped = new Map();
           for (const outcome of (mkt.outcomes || [])) {
-            if (outcome.description && outcome.point != null) {
-              allProps.push({
+            if (!outcome.description || outcome.point == null) continue;
+            const key = `${outcome.description}::${mkt.key}::${outcome.point}`;
+            if (!grouped.has(key)) {
+              grouped.set(key, {
                 oddsEventId,
                 playerName: outcome.description,
-                market: mkt.key,
-                line: outcome.point,
-                price: outcome.price,
-                bookmaker: bm.key,
-                sport: 'nhl',
+                market:     mkt.key,
+                line:       outcome.point,
+                bookmaker:  bm.title || bm.key,
+                sport:      'nhl',
               });
+            }
+            const entry = grouped.get(key);
+            if (outcome.name === 'Over')  entry.overOdds  = outcome.price;
+            if (outcome.name === 'Under') entry.underOdds = outcome.price;
+          }
+
+          for (const p of grouped.values()) {
+            // Keep only props that have at least one side (some books only quote Over)
+            if (p.overOdds != null || p.underOdds != null) {
+              allProps.push(p);
             }
           }
         }
+
+        // Prefer DraftKings if present (matches NBA adapter behavior)
+        if (allProps.length > 0 && (bm.title === 'DraftKings' || bm.key === 'draftkings')) break;
       }
 
       return allProps;

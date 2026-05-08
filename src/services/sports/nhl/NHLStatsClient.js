@@ -28,6 +28,7 @@ const logger = require('../../../config/logger');
 
 const BASE_URL     = 'https://api-web.nhle.com/v1';
 const TIMEOUT_MS   = 10_000;
+const HTTP_RETRIES = 2;
 
 // Cache TTLs
 const TTL_ROSTER       = 24 * 3600;
@@ -126,20 +127,104 @@ function getTeamAbbrev(teamName) {
   return null;
 }
 
+function _coerceTeamAbbrev(value) {
+  if (!value || typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  if (trimmed.length === 3) return trimmed.toUpperCase();
+  return getTeamAbbrev(trimmed);
+}
+
+async function _hydrateCachedResolvedPlayer(cachedPlayer, teams = [], normTarget = null) {
+  if (!cachedPlayer || typeof cachedPlayer !== 'object') return null;
+
+  // Backward-compat: older cache payloads may have team/teamName instead of teamAbbrev.
+  const explicitTeam =
+    _coerceTeamAbbrev(cachedPlayer.teamAbbrev) ||
+    _coerceTeamAbbrev(cachedPlayer.team) ||
+    _coerceTeamAbbrev(cachedPlayer.teamName) ||
+    _coerceTeamAbbrev(cachedPlayer.abbrev);
+
+  if (explicitTeam) {
+    return {
+      ...cachedPlayer,
+      teamAbbrev: explicitTeam,
+    };
+  }
+
+  const id = Number(cachedPlayer.id);
+  if (!Number.isFinite(id)) return cachedPlayer;
+
+  for (const team of teams) {
+    const roster = await getTeamRoster(team);
+    if (!roster?.size) continue;
+
+    if (normTarget && roster.has(normTarget)) {
+      const exact = roster.get(normTarget);
+      if (Number(exact?.id) === id) {
+        return {
+          ...cachedPlayer,
+          firstName: cachedPlayer.firstName || exact.firstName,
+          lastName: cachedPlayer.lastName || exact.lastName,
+          fullName: cachedPlayer.fullName || exact.fullName,
+          position: cachedPlayer.position || exact.position,
+          teamAbbrev: exact.teamAbbrev,
+        };
+      }
+    }
+
+    for (const [, player] of roster) {
+      if (Number(player?.id) !== id) continue;
+      return {
+        ...cachedPlayer,
+        firstName: cachedPlayer.firstName || player.firstName,
+        lastName: cachedPlayer.lastName || player.lastName,
+        fullName: cachedPlayer.fullName || player.fullName,
+        position: cachedPlayer.position || player.position,
+        teamAbbrev: player.teamAbbrev,
+      };
+    }
+  }
+
+  return cachedPlayer;
+}
+
 // ── HTTP helper ───────────────────────────────────────────────────────────────
 
 async function _get(path) {
   const url = `${BASE_URL}${path}`;
-  const res = await axios.get(url, {
-    timeout: TIMEOUT_MS,
-    headers: {
-      'User-Agent':      'Mozilla/5.0 (compatible; SignalDraft/1.0)',
-      'Accept':          'application/json',
-      'Accept-Language': 'en-US,en;q=0.9',
-      'Referer':         'https://www.nhl.com/',
-    },
-  });
-  return res.data;
+  const isRetryable = (err) => {
+    const code = err?.code || err?.cause?.code;
+    return code === 'ENOTFOUND' || code === 'EAI_AGAIN' || code === 'ECONNRESET' || code === 'ETIMEDOUT';
+  };
+
+  for (let attempt = 0; attempt <= HTTP_RETRIES; attempt += 1) {
+    try {
+      const res = await axios.get(url, {
+        timeout: TIMEOUT_MS,
+        headers: {
+          'User-Agent':      'Mozilla/5.0 (compatible; SignalDraft/1.0)',
+          'Accept':          'application/json',
+          'Accept-Language': 'en-US,en;q=0.9',
+          'Referer':         'https://www.nhl.com/',
+        },
+      });
+      return res.data;
+    } catch (err) {
+      if (attempt >= HTTP_RETRIES || !isRetryable(err)) throw err;
+      const waitMs = 250 * (attempt + 1);
+      logger.warn('[NHLStatsClient] transient HTTP error, retrying', {
+        path,
+        attempt: attempt + 1,
+        maxRetries: HTTP_RETRIES,
+        code: err?.code || err?.cause?.code || null,
+        message: err?.message || 'unknown error',
+      });
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
+    }
+  }
+
+  return null;
 }
 
 // ── Player ID resolution ──────────────────────────────────────────────────────
@@ -209,13 +294,20 @@ async function resolvePlayerId(playerName, homeTeamName, awayTeamName) {
   const normTarget = _normName(playerName);
   if (!normTarget) return null;
 
+  const teams = [homeTeamName, awayTeamName].filter(Boolean);
+
   // Cache key includes both team contexts so we don't pollute across games
-  const teamsKey   = [homeTeamName, awayTeamName].filter(Boolean).map(getTeamAbbrev).filter(Boolean).sort().join('-') || 'any';
+  const teamsKey   = teams.map(getTeamAbbrev).filter(Boolean).sort().join('-') || 'any';
   const idCacheKey = `nhl:playerid:${teamsKey}:${normTarget}`;
   const cachedId   = await cacheGet(idCacheKey);
-  if (cachedId) return cachedId;
+  if (cachedId) {
+    const hydrated = await _hydrateCachedResolvedPlayer(cachedId, teams, normTarget);
+    if (hydrated?.teamAbbrev && !cachedId.teamAbbrev) {
+      await cacheSet(idCacheKey, hydrated, TTL_PLAYER_ID);
+    }
+    return hydrated;
+  }
 
-  const teams  = [homeTeamName, awayTeamName].filter(Boolean);
   const rosters = await Promise.allSettled(teams.map(t => getTeamRoster(t)));
 
   for (const result of rosters) {

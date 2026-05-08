@@ -263,20 +263,79 @@ const _markGamePropsState = async ({ sport, eventId, hasProps, startTime }) => {
   await Promise.all([...keys].map(k => cacheDel(k)));
 };
 
+const _apiSportsLogoById = (sport, id) => {
+  if (!id) return null;
+  const path = { nba: 'basketball', mlb: 'baseball', nhl: 'hockey', nfl: 'american-football' }[sport];
+  if (!path) return null;
+  return `https://media.api-sports.io/${path}/teams/${id}.png`;
+};
+
+const _normalizeTeam = (game, side) => {
+  const sideName = side === 'home' ? 'homeTeam' : 'awayTeam';
+  const raw = game?.[sideName];
+
+  const fromObject = (key) => (raw && typeof raw === 'object' ? raw[key] : null);
+
+  const name =
+    (typeof raw === 'string' ? raw : null) ||
+    fromObject('name') ||
+    game?.[`${sideName}Name`] ||
+    null;
+
+  const abbreviation =
+    fromObject('abbreviation') ||
+    game?.[`${sideName}Abbreviation`] ||
+    null;
+
+  const apiSportsId =
+    fromObject('apiSportsId') ||
+    game?.[`${sideName}ApiSportsId`] ||
+    null;
+
+  const logoUrl =
+    fromObject('logoUrl') ||
+    game?.[`${sideName}LogoUrl`] ||
+    null;
+
+  const logo =
+    fromObject('logo') ||
+    game?.[`${sideName}Logo`] ||
+    null;
+
+  if (!name && !abbreviation && !apiSportsId && !logoUrl && !logo) {
+    return raw && typeof raw === 'object' ? raw : null;
+  }
+
+  return {
+    ...(raw && typeof raw === 'object' ? raw : {}),
+    name,
+    abbreviation,
+    apiSportsId,
+    logoUrl,
+    logo,
+  };
+};
+
 const _resolveTeamLogoUrl = (sport, team) => {
   if (!team) return null;
   if (team.logoUrl) return team.logoUrl;
   if (team.logo)    return team.logo;
+  if (team.apiSportsId) return _apiSportsLogoById(sport, team.apiSportsId);
   return getTeamLogoUrl(sport, team.name) || getApiSportsLogoUrl(sport, team.name) || null;
 };
 
 const _hydrateTeamLogos = (games) => {
   if (!Array.isArray(games) || !games.length) return games || [];
-  return games.map(game => ({
-    ...game,
-    homeTeam: game.homeTeam ? { ...game.homeTeam, logoUrl: _resolveTeamLogoUrl(game.sport, game.homeTeam) } : game.homeTeam,
-    awayTeam: game.awayTeam ? { ...game.awayTeam, logoUrl: _resolveTeamLogoUrl(game.sport, game.awayTeam) } : game.awayTeam,
-  }));
+  return games.map(game => {
+    const homeTeam = _normalizeTeam(game, 'home');
+    const awayTeam = _normalizeTeam(game, 'away');
+
+    return {
+      ...game,
+      homeTeam: homeTeam ? { ...homeTeam, logoUrl: _resolveTeamLogoUrl(game.sport, homeTeam) } : homeTeam,
+      awayTeam: awayTeam ? { ...awayTeam, logoUrl: _resolveTeamLogoUrl(game.sport, awayTeam) } : awayTeam,
+    };
+  });
 };
 
 module.exports = { getSports, getGames, getProps };
