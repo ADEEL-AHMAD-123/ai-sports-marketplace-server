@@ -98,10 +98,10 @@ const getProps = async (req, res, next) => {
       logger.debug(`⚡ [OddsController] Cache HIT — props for ${eventId}`);
       // Re-check game context for backward compat with old cache entries
       let withCtx = cached;
-      const needsCtx = !Array.isArray(cached) || !cached[0]?.awayTeam;
+      const needsCtx = !Array.isArray(cached) || !cached[0]?.awayTeam || !cached[0]?.awayTeamLogo;
       if (needsCtx && cached.length > 0) {
         const game = await Game.findOne({ sport, oddsEventId: eventId })
-          .select('awayTeam.name homeTeam.name startTime').lean();
+          .select('awayTeam homeTeam startTime').lean();
         withCtx = _enrichPropsWithGameContext(cached, game);
       }
       return res.status(HTTP_STATUS.OK).json({
@@ -111,7 +111,7 @@ const getProps = async (req, res, next) => {
     }
 
     const game = await Game.findOne({ sport, oddsEventId: eventId })
-      .select('awayTeam.name homeTeam.name startTime').lean();
+      .select('awayTeam homeTeam startTime').lean();
 
     const query = { sport, oddsEventId: eventId, isAvailable: true };
     if (filter === 'highConfidence') query.isHighConfidence = true;
@@ -243,11 +243,22 @@ const _personalizeProps = async (props, user) => {
 
 const _enrichPropsWithGameContext = (props, game) => {
   if (!props?.length) return props || [];
+  const sport = game?.sport || props[0]?.sport || null;
+  const awayTeamObj = game?.awayTeam || {};
+  const homeTeamObj = game?.homeTeam || {};
+  const awayLogoUrl = awayTeamObj.logoUrl || awayTeamObj.logo
+    || (awayTeamObj.name ? (_resolveTeamLogoUrl(sport, awayTeamObj)) : null);
+  const homeLogoUrl = homeTeamObj.logoUrl || homeTeamObj.logo
+    || (homeTeamObj.name ? (_resolveTeamLogoUrl(sport, homeTeamObj)) : null);
   return props.map(prop => ({
     ...prop,
-    awayTeam:      game?.awayTeam?.name  || null,
-    homeTeam:      game?.homeTeam?.name  || null,
-    gameStartTime: game?.startTime       || null,
+    awayTeam:      awayTeamObj.name  || prop.awayTeam  || null,
+    homeTeam:      homeTeamObj.name  || prop.homeTeam  || null,
+    awayTeamLogo:  awayLogoUrl       || prop.awayTeamLogo || null,
+    homeTeamLogo:  homeLogoUrl       || prop.homeTeamLogo || null,
+    awayTeamAbbr:  awayTeamObj.abbreviation || prop.awayTeamAbbr || null,
+    homeTeamAbbr:  homeTeamObj.abbreviation || prop.homeTeamAbbr || null,
+    gameStartTime: game?.startTime   || prop.gameStartTime || null,
   }));
 };
 
