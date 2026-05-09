@@ -16,6 +16,7 @@ const logger     = require('../../config/logger');
 const NBAAdapter = require('../sports/nba/NBAAdapter');
 const MLBAdapter = require('../sports/mlb/MLBAdapter');
 const NHLAdapter = require('../sports/nhl/NHLAdapter');
+const SoccerAdapter = require('../sports/soccer/SoccerAdapter');
 
 class StubAdapter {
   constructor(sport) { this.sport = sport; }
@@ -34,7 +35,7 @@ const registry = {
   [SPORTS.MLB]:    new MLBAdapter(),
   [SPORTS.NFL]:    new StubAdapter(SPORTS.NFL),
   [SPORTS.NHL]:    new NHLAdapter(),
-  [SPORTS.SOCCER]: new StubAdapter(SPORTS.SOCCER),
+  [SPORTS.SOCCER]: new SoccerAdapter(),
 };
 
 const getAdapter = (sport) => {

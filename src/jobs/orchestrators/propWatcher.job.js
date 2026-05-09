@@ -15,6 +15,7 @@ const WATCHERS = {
   nba: require('../sports/nba/propWatcher'),
   mlb: require('../sports/mlb/propWatcher'),
   nhl: require('../sports/nhl/propWatcher'),
+  soccer: require('../sports/soccer/propWatcher'),
 };
 
 const runPropWatcher = async (sport = null) => {

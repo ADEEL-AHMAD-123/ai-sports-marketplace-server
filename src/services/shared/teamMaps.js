@@ -126,9 +126,53 @@ const NHL_TEAMS = {
   'Winnipeg Jets':         { id: 704,  abbr: 'wpg' },
 };
 
+// ─── Soccer (Premier League) ───────────────────────────────────────────────
+// API-Sports football v3 team IDs (league 39)
+const SOCCER_TEAMS = {
+  'Sevilla':                 { id: 536, abbr: 'sev' },
+  'Espanyol':                { id: 540, abbr: 'esp' },
+  'Atletico Madrid':         { id: 530, abbr: 'atm' },
+  'Atlético Madrid':         { id: 530, abbr: 'atm' },
+  'Celta Vigo':              { id: 538, abbr: 'cel' },
+  'VfL Wolfsburg':           { id: 161, abbr: 'wol' },
+  'Bayern Munich':           { id: 157, abbr: 'bay' },
+  'Bayern München':          { id: 157, abbr: 'bay' },
+  'Toronto FC':              { id: 1601, abbr: 'tor' },
+  'Inter Miami':             { id: 9568, abbr: 'mia' },
+  'Inter Miami CF':          { id: 9568, abbr: 'mia' },
+  'Lazio':                   { id: 487, abbr: 'laz' },
+  'Inter Milan':             { id: 505, abbr: 'int' },
+  'Inter':                   { id: 505, abbr: 'int' },
+  'Sunderland':              { id: 49,  abbr: 'sun' },
+  'Arsenal':                 { id: 42, abbr: 'ars' },
+  'Aston Villa':             { id: 66, abbr: 'avl' },
+  'Bournemouth':             { id: 35, abbr: 'bou' },
+  'Brentford':               { id: 55, abbr: 'bre' },
+  'Brighton and Hove Albion': { id: 51, abbr: 'bha' },
+  'Brighton':                { id: 51, abbr: 'bha' },
+  'Burnley':                 { id: 44, abbr: 'bur' },
+  'Chelsea':                 { id: 49, abbr: 'che' },
+  'Crystal Palace':          { id: 52, abbr: 'cry' },
+  'Everton':                 { id: 45, abbr: 'eve' },
+  'Fulham':                  { id: 36, abbr: 'ful' },
+  'Ipswich':                 { id: 57, abbr: 'ips' },
+  'Leicester':               { id: 46, abbr: 'lei' },
+  'Liverpool':               { id: 40, abbr: 'liv' },
+  'Manchester City':         { id: 50, abbr: 'mci' },
+  'Manchester United':       { id: 33, abbr: 'mun' },
+  'Newcastle':               { id: 34, abbr: 'new' },
+  'Nottingham Forest':       { id: 65, abbr: 'nfo' },
+  'Southampton':             { id: 41, abbr: 'sou' },
+  'Tottenham Hotspur':       { id: 47, abbr: 'tot' },
+  'Tottenham':               { id: 47, abbr: 'tot' },
+  'West Ham':                { id: 48, abbr: 'whu' },
+  'Wolverhampton Wanderers': { id: 39, abbr: 'wol' },
+  'Wolves':                  { id: 39, abbr: 'wol' },
+};
+
 // ─── Lookup helpers ───────────────────────────────────────────────────────────
 
-const TEAM_MAPS = { nba: NBA_TEAMS, mlb: MLB_TEAMS, nhl: NHL_TEAMS };
+const TEAM_MAPS = { nba: NBA_TEAMS, mlb: MLB_TEAMS, nhl: NHL_TEAMS, soccer: SOCCER_TEAMS };
 
 /**
  * Get API-Sports numeric team ID from full team name.
@@ -151,11 +195,14 @@ const getTeamAbbr = (sport, name) => {
  * @returns {string} Full HTTPS URL ready to use in <img src>
  */
 const getTeamLogoUrl = (sport, name) => {
+  if (sport === 'soccer') {
+    return getApiSportsLogoUrl(sport, name);
+  }
   const team = TEAM_MAPS[sport]?.[name];
   if (!team) return null;
   const espnCode = team.espn || team.abbr;   // NHL entries only have abbr
   if (!espnCode) return null;
-  const sportPath = { nba: 'nba', mlb: 'mlb', nhl: 'nhl', nfl: 'nfl' }[sport] || sport;
+  const sportPath = { nba: 'nba', mlb: 'mlb', nhl: 'nhl', nfl: 'nfl', soccer: 'soccer' }[sport] || sport;
   return `https://a.espncdn.com/i/teamlogos/${sportPath}/500/${espnCode}.png`;
 };
 
@@ -165,11 +212,11 @@ const getTeamLogoUrl = (sport, name) => {
 const getApiSportsLogoUrl = (sport, name) => {
   const id = getTeamId(sport, name);
   if (!id) return null;
-  const path = { nba: 'basketball', mlb: 'baseball', nhl: 'hockey', nfl: 'american-football' }[sport];
+  const path = { nba: 'basketball', mlb: 'baseball', nhl: 'hockey', nfl: 'american-football', soccer: 'football' }[sport];
   return `https://media.api-sports.io/${path}/teams/${id}.png`;
 };
 
 module.exports = {
-  NBA_TEAMS, MLB_TEAMS, NHL_TEAMS,
+  NBA_TEAMS, MLB_TEAMS, NHL_TEAMS, SOCCER_TEAMS,
   getTeamId, getTeamAbbr, getTeamLogoUrl, getApiSportsLogoUrl,
 };

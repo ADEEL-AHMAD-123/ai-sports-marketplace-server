@@ -165,6 +165,39 @@ const LEAGUE_PROFILES = {
     },
   },
 
+  soccer: {
+    scoring: {
+      highConfidenceThreshold: 57,
+      minEdgePercentage: 15,
+      minGamesByStatType: {
+        goals: 5,
+        assists: 5,
+        shots_on_target: 5,
+        default: 5,
+      },
+      confidence: {
+        maxWeight:              1.4,
+        strongWeight:           1.4,
+        normalWeight:           1.0,
+        weakWeight:             0.7,
+        strongMarginCap:        1.0,
+        normalMarginCap:        0.3,
+        normalMarginLineFactor: 0.5,
+      },
+      edgeToConfidenceTiers: [
+        { minAbsEdge: 25, score: 80 },
+        { minAbsEdge: 15, score: 65 },
+        { minAbsEdge: 8,  score: 50 },
+        { minAbsEdge: 0,  score: 30 },
+      ],
+      minEdgeByStatType: {
+        goals: 20,
+        assists: 18,
+        shots_on_target: 12,
+      },
+    },
+  },
+
 };
 
 /**

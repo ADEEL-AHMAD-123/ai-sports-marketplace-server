@@ -13,6 +13,7 @@ const SYNCS = {
   nba: require('../sports/nba/postGameSync'),
   mlb: require('../sports/mlb/postGameSync'),
   nhl: require('../sports/nhl/postGameSync'),
+  soccer: require('../sports/soccer/postGameSync'),
 };
 
 const runPostGameSync = async (sport = null) => {

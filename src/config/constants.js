@@ -17,7 +17,7 @@ const SPORT_LABELS = {
   [SPORTS.MLB]: 'MLB Baseball',   [SPORTS.NHL]: 'NHL Hockey', [SPORTS.SOCCER]: 'Soccer',
 };
 
-const ACTIVE_SPORTS = [SPORTS.NBA, SPORTS.MLB, SPORTS.NHL];
+const ACTIVE_SPORTS = [SPORTS.NBA, SPORTS.MLB, SPORTS.NHL, SPORTS.NFL, SPORTS.SOCCER];
 
 // ─── Bet market types ──────────────────────────────────────────────────────────
 const MARKET_TYPES = {

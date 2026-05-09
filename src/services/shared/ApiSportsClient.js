@@ -30,7 +30,40 @@ const BASE_URLS = {
 
 // Daily request counter (resets at midnight UTC — matches API-Sports reset)
 const dailyCounters = {};
-const FREE_TIER_DAILY_LIMIT = 100;
+const FREE_TIER_DAILY_LIMIT = Number(process.env.API_SPORTS_DAILY_LIMIT) || 100;
+
+// Per-minute rate limiter — sliding window per sport
+// API-Football Pro allows ~30 req/min; we use 25 to stay safely under
+const RATE_LIMIT_PER_MINUTE = {
+  soccer: 25,  // API-Football Pro: 30/min — use 25 to be safe
+};
+const rateLimitWindows = {}; // sport -> array of timestamps (ms) of recent calls
+
+function _acquireRateSlot(sport) {
+  const limit = RATE_LIMIT_PER_MINUTE[sport];
+  if (!limit) return Promise.resolve(); // no throttle for other sports
+
+  if (!rateLimitWindows[sport]) rateLimitWindows[sport] = [];
+  const window = rateLimitWindows[sport];
+  const now = Date.now();
+  const oneMinuteAgo = now - 60_000;
+
+  // Purge timestamps older than 1 minute
+  while (window.length && window[0] <= oneMinuteAgo) window.shift();
+
+  if (window.length < limit) {
+    window.push(now);
+    return Promise.resolve();
+  }
+
+  // Window is full — wait until the oldest slot falls outside the 1-min window
+  const waitMs = window[0] + 60_000 - now + 50; // +50ms buffer
+  logger.debug(`[ApiSports/${sport}] Rate limit window full (${window.length}/${limit}), waiting ${waitMs}ms`);
+  return new Promise(resolve => setTimeout(() => {
+    // Re-enter after wait to register the slot correctly
+    _acquireRateSlot(sport).then(resolve);
+  }, waitMs));
+}
 
 class ApiSportsClient {
   constructor(sport) {
@@ -71,6 +104,9 @@ class ApiSportsClient {
   async get(endpoint, params = {}) {
     if (!this._checkDailyLimit()) return null;
 
+    // Enforce per-minute rate limit before making the call
+    await _acquireRateSlot(this.sport);
+
     const url = `${this.baseUrl}/${endpoint}`;
     try {
       const res = await axios.get(url, {
@@ -93,8 +129,11 @@ class ApiSportsClient {
         return null;
       }
       if (status === 429) {
-        logger.error(`[ApiSports/${this.sport}] 429 — rate limit hit`);
-        return null;
+        // Shouldn't happen with rate limiter, but back off and retry once
+        const retryAfter = Number(err.response?.headers?.['retry-after'] || 5);
+        logger.warn(`[ApiSports/${this.sport}] 429 — backing off ${retryAfter}s`);
+        await new Promise(r => setTimeout(r, retryAfter * 1000));
+        return this.get(endpoint, params);
       }
       logger.error(`[ApiSports/${this.sport}] ${endpoint} failed`, { status, error: err.message });
       throw err;

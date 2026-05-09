@@ -39,10 +39,25 @@ const gameSchema = new mongoose.Schema(
       required: true,
     },
 
-    // ── External IDs ──────────────────────────────────────────────────────────
-    // ID from The Odds API — used to fetch betting lines
+    // League ID from the provider (e.g., 39 for EPL on API-Football)
+    leagueId: {
+      type: Number,
+    },
+
+    // League region (e.g., "England", "Spain", "Global")
+    leagueRegion: {
+      type: String,
+    },
+
+    // Odds API sport key (e.g., "soccer_epl" — used for fetching props)
+    oddsSportKey: {
+      type: String,
+    },
+
+    // The Odds API event ID — primary deduplication key and used to fetch props
     oddsEventId: {
       type: String,
+      index: true,
     },
 
     // ID from API-Sports — used to fetch player stats
@@ -114,9 +129,6 @@ const gameSchema = new mongoose.Schema(
 
 // Primary query: "Give me today's NBA games that are upcoming"
 gameSchema.index({ sport: 1, startTime: 1, status: 1 });
-
-// The Morning Scraper deduplication check
-gameSchema.index({ oddsEventId: 1 }, { unique: true, sparse: true });
 
 // ─── Statics ──────────────────────────────────────────────────────────────────
 

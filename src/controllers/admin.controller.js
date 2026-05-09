@@ -402,10 +402,12 @@ const triggerCronJob = async (req, res, next) => {
       'prop-watcher-nba':   ['../jobs/sports/nba/propWatcher',            'run'],
       'prop-watcher-mlb':   ['../jobs/sports/mlb/propWatcher',            'run'],
       'prop-watcher-nhl':   ['../jobs/sports/nhl/propWatcher',            'run'],
+      'prop-watcher-soccer':['../jobs/sports/soccer/propWatcher',         'run'],
       'post-game-sync':     ['../jobs/orchestrators/postGameSync.job',    'runPostGameSync'],
       'post-game-sync-nba': ['../jobs/sports/nba/postGameSync',           'run'],
       'post-game-sync-mlb': ['../jobs/sports/mlb/postGameSync',           'run'],
       'post-game-sync-nhl': ['../jobs/sports/nhl/postGameSync',           'run'],
+      'post-game-sync-soccer': ['../jobs/sports/soccer/postGameSync',     'run'],
       'ai-log-cleanup':     ['../jobs/orchestrators/postGameSync.job',    'runAILogCleanup'],
     };
 

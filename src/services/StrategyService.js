@@ -76,7 +76,7 @@ class StrategyService {
   async scoreAllPropsForSport(sport) {
     logger.info(`📊 [StrategyService] Scoring all props for ${sport}...`);
 
-    const props = await PlayerProp.find({ sport, isAvailable: true }).lean();
+    const props = await PlayerProp.find({ sport, isAvailable: true }).populate('gameId', 'league leagueId leagueRegion').lean();
     logger.info(`📊 [StrategyService] Found ${props.length} props to score for ${sport}`);
 
     let scored  = 0;
@@ -98,6 +98,14 @@ class StrategyService {
             playerName: prop.playerName,
             homeTeamName: prop.homeTeamName,
             awayTeamName: prop.awayTeamName,
+          });
+        } else if (sport === 'soccer') {
+          // Pass leagueId for optimized search — only searches specific league, not all 6
+          stats = await adapter.fetchPlayerStats({
+            playerName: prop.playerName,
+            homeTeamName: prop.homeTeamName,
+            awayTeamName: prop.awayTeamName,
+            leagueId: prop.gameId?.leagueId,
           });
         } else if (prop.apiSportsPlayerId) {
           stats = await adapter.fetchPlayerStats({ playerId: prop.apiSportsPlayerId });

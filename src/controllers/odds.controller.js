@@ -48,9 +48,10 @@ const getGames = async (req, res, next) => {
     const cached = await cacheGet(cacheKey);
     if (cached) {
       logger.debug(`⚡ [OddsController] Cache HIT — games for ${sport}`);
+      const visibleGames = _onlyGamesWithProps(cached);
       return res.status(HTTP_STATUS.OK).json({
         success: true, source: 'cache',
-        data: _hydrateTeamLogos(cached),
+        data: _hydrateTeamLogos(visibleGames),
       });
     }
 
@@ -60,6 +61,7 @@ const getGames = async (req, res, next) => {
 
     let games = await Game.find({
       sport,
+      oddsEventId: { $exists: true, $ne: null },
       startTime: { $gte: windowStart, $lte: windowEnd },
       status: { $in: [GAME_STATUS.SCHEDULED, GAME_STATUS.LIVE] },
     }).sort({ startTime: 1 }).select('-__v').lean();
@@ -68,13 +70,15 @@ const getGames = async (req, res, next) => {
       logger.warn(`[OddsController] No games with status filter for ${sport}, trying fallback...`);
       games = await Game.find({
         sport,
+        oddsEventId: { $exists: true, $ne: null },
         startTime: { $gte: windowStart, $lte: windowEnd },
       }).sort({ startTime: 1 }).select('-__v').lean();
       logger.info(`[OddsController] Fallback found ${games.length} games for ${sport}`);
     }
 
     const enriched  = await _enrichGamesWithPropStats(games, sport);
-    const hydrated  = _hydrateTeamLogos(enriched);
+    const visibleGames = _onlyGamesWithProps(enriched);
+    const hydrated  = _hydrateTeamLogos(visibleGames);
 
     await cacheSet(cacheKey, hydrated, CACHE_TTL.SCHEDULE);
     logger.debug(`[OddsController] Games fetched from DB for ${sport}: ${games.length}`);
@@ -276,7 +280,7 @@ const _markGamePropsState = async ({ sport, eventId, hasProps, startTime }) => {
 
 const _apiSportsLogoById = (sport, id) => {
   if (!id) return null;
-  const path = { nba: 'basketball', mlb: 'baseball', nhl: 'hockey', nfl: 'american-football' }[sport];
+  const path = { nba: 'basketball', mlb: 'baseball', nhl: 'hockey', nfl: 'american-football', soccer: 'football' }[sport];
   if (!path) return null;
   return `https://media.api-sports.io/${path}/teams/${id}.png`;
 };
@@ -329,6 +333,10 @@ const _normalizeTeam = (game, side) => {
 
 const _resolveTeamLogoUrl = (sport, team) => {
   if (!team) return null;
+  if (sport === 'soccer') {
+    if (team.apiSportsId) return _apiSportsLogoById(sport, team.apiSportsId);
+    return getApiSportsLogoUrl(sport, team.name) || getTeamLogoUrl(sport, team.name) || team.logoUrl || team.logo || null;
+  }
   if (team.logoUrl) return team.logoUrl;
   if (team.logo)    return team.logo;
   if (team.apiSportsId) return _apiSportsLogoById(sport, team.apiSportsId);
@@ -347,6 +355,11 @@ const _hydrateTeamLogos = (games) => {
       awayTeam: awayTeam ? { ...awayTeam, logoUrl: _resolveTeamLogoUrl(game.sport, awayTeam) } : awayTeam,
     };
   });
+};
+
+const _onlyGamesWithProps = (games) => {
+  if (!Array.isArray(games) || !games.length) return games || [];
+  return games.filter((game) => (game?.hasProps === true) || ((game?.propCount || 0) > 0));
 };
 
 module.exports = { getSports, getGames, getProps };
