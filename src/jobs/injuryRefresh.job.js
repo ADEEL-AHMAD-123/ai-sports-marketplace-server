@@ -45,7 +45,7 @@ const runInjuryRefreshCycle = async () => {
       startTime: { $gte: windowStart, $lte: windowEnd },
       status: { $in: [GAME_STATUS.SCHEDULED, GAME_STATUS.LIVE] },
     })
-      .select('_id oddsEventId homeTeam.name awayTeam.name startTime')
+      .select('_id oddsEventId leagueId homeTeam.name homeTeam.apiSportsId awayTeam.name awayTeam.apiSportsId startTime')
       .lean();
 
     for (const game of games) {
@@ -76,8 +76,13 @@ const _refreshGameInjuries = async (sport, game, now = new Date()) => {
   const staleBefore = new Date(now.getTime() - (STALE_MINUTES * 60 * 1000));
   const injuryByPlayer = await getInjuryStatusesForGame(
     {
+      leagueId: game.leagueId,
       homeTeamName: game.homeTeam?.name,
       awayTeamName: game.awayTeam?.name,
+      homeTeamApiSportsId: game.homeTeam?.apiSportsId,
+      awayTeamApiSportsId: game.awayTeam?.apiSportsId,
+      startTime: game.startTime,
+      oddsEventId: game.oddsEventId,
     },
     sport
   );

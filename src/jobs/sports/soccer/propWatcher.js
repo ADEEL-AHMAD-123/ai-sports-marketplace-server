@@ -7,11 +7,19 @@ const PlayerProp = require('../../../models/PlayerProp.model');
 const Insight = require('../../../models/Insight.model');
 const StrategyService = require('../../../services/StrategyService');
 const { getAdapter } = require('../../../services/shared/adapterRegistry');
+const SoccerInjuryService = require('../../../services/sports/soccer/SoccerInjuryService');
 const { cacheDel } = require('../../../config/redis');
 const { ODDS_CHANGE_THRESHOLD, INSIGHT_STATUS } = require('../../../config/constants');
 const logger = require('../../../config/logger');
 
 const SPORT = 'soccer';
+const normName = (n = '') => String(n)
+  .normalize('NFD')
+  .replace(/[\u0300-\u036f]/g, '')
+  .toLowerCase()
+  .replace(/[.'\-]/g, ' ')
+  .replace(/\s+/g, ' ')
+  .trim();
 
 async function run() {
   logger.info(`👁️  [${SPORT.toUpperCase()}PropWatcher] Starting...`);
@@ -35,6 +43,16 @@ async function run() {
   for (const game of games) {
     const rawProps = await adapter.fetchProps(game.oddsEventId, { oddsSportKey: game.oddsSportKey });
 
+    const injuryMap = await SoccerInjuryService.getInjuryMap({
+      leagueId: game.leagueId,
+      startTime: game.startTime,
+      homeTeamName: game.homeTeam?.name,
+      awayTeamName: game.awayTeam?.name,
+      homeTeamApiSportsId: game.homeTeam?.apiSportsId,
+      awayTeamApiSportsId: game.awayTeam?.apiSportsId,
+      oddsEventId: game.oddsEventId,
+    }).catch(() => new Map());
+
     if (!rawProps.length) {
       await PlayerProp.updateMany(
         { sport: SPORT, oddsEventId: game.oddsEventId, isAvailable: true },
@@ -46,6 +64,8 @@ async function run() {
 
     const bulkOps = rawProps.map((rp) => {
       const norm = adapter.normalizeProp(rp);
+      const injury = injuryMap.get(normName(norm.playerName)) || null;
+      const isOut = injury?.status === 'Out';
       return {
         updateOne: {
           filter: { oddsEventId: norm.oddsEventId, playerName: norm.playerName, statType: norm.statType },
@@ -58,7 +78,11 @@ async function run() {
               awayTeamName: game.awayTeam?.name || null,
               focusStatAvg: norm.line || null,
               aiPredictedValue: norm.line || null,
-              isAvailable: true,
+              isAvailable: !isOut,
+              injuryStatus: injury?.status || null,
+              injuryReason: injury?.reason || null,
+              injurySeverity: injury?.severity || null,
+              injuryUpdatedAt: injury ? new Date() : null,
             },
           },
           upsert: true,

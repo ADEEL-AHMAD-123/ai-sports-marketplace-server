@@ -12,12 +12,14 @@
 const NBAInjuryService = require('./sports/nba/NBAInjuryService');
 const MLBInjuryService = require('./sports/mlb/MLBInjuryService');
 const NHLInjuryService = require('./sports/nhl/NHLInjuryService');
+const SoccerInjuryService = require('./sports/soccer/SoccerInjuryService');
 const logger           = require('../config/logger');
 
 const INJURY_SERVICES = {
   nba: NBAInjuryService,
   mlb: MLBInjuryService,
   nhl: NHLInjuryService,
+  soccer: SoccerInjuryService,
 };
 
 function isInjurySportSupported(sport) {

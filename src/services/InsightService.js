@@ -174,8 +174,13 @@ class InsightService {
     try {
       game = await Game.findOne({ oddsEventId: eventId }).lean();
       const teamCtx = {
+        leagueId: game?.leagueId,
         homeTeamName: game?.homeTeam?.name,
         awayTeamName: game?.awayTeam?.name,
+        homeTeamApiSportsId: game?.homeTeam?.apiSportsId,
+        awayTeamApiSportsId: game?.awayTeam?.apiSportsId,
+        startTime: game?.startTime,
+        oddsEventId: eventId,
       };
       injuryContext = await getInjuryPromptContext(playerName, teamCtx, sport);
       if (injuryContext) {
