@@ -372,6 +372,10 @@ class StrategyService {
       if (absEdge < 0.5) {
         baseConfidence = Math.min(baseConfidence, 30);
       }
+      // Thin baseline (<20 games): cap at 80 — not enough data to be extremely confident
+      if (baselineGamesCount < 20) {
+        baseConfidence = Math.min(baseConfidence, 80);
+      }
       confidenceScore = baseConfidence;
     } else {
       confidenceScore = this._edgeToConfidence(absEdge, context);

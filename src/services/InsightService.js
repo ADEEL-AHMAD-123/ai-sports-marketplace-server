@@ -122,6 +122,22 @@ class InsightService {
         logger.debug('[InsightService] Applied outlier-edge guardrail to cache hit (extreme edge + thin baseline)', logCtx);
       }
 
+      // Thin baseline (<20 games): cap confidence at 80 — can't be extremely confident on small sample
+      if (existingBaseline < 20 && existing.confidenceScore > 80) {
+        existing.confidenceScore = 80;
+        if (existing.isHighConfidence && 80 < 70) existing.isHighConfidence = false;
+        guardrailUpdates.confidenceScore = 80;
+        logger.debug('[InsightService] Applied thin-baseline confidence cap to cache hit', logCtx);
+      }
+
+      // MLB null stats: if sport is MLB and all batter stats are null, dataQuality cannot be strong
+      if (existing.sport === 'mlb' && existing.hitsPerG == null && existing.tbPerG == null &&
+          existing.rbiPerG == null && existing.dataQuality === 'strong') {
+        existing.dataQuality = 'moderate';
+        guardrailUpdates.dataQuality = 'moderate';
+        logger.debug('[InsightService] Applied MLB null-stats quality downgrade to cache hit', logCtx);
+      }
+
       // Persist guardrail corrections back to DB (lean() object is not auto-saved)
       if (Object.keys(guardrailUpdates).length > 0) {
         await Insight.findByIdAndUpdate(existing._id, { $set: guardrailUpdates });

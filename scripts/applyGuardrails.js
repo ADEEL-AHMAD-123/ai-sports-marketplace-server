@@ -12,6 +12,8 @@
  *   2. Weak-edge   : |edge| < 5%    → conf ≤ 55, HC false, quality moderate
  *   3. Outlier-edge: |edge| > 80%  AND baseline < 20 → quality moderate
  *   4. HC sanity   : HC true but conf < highConfidenceThreshold → HC false
+ *   5. Thin baseline: baseline < 20 games → conf ≤ 80
+ *   6. MLB null stats: hitsPerG/tbPerG/rbiPerG all null → quality moderate
  */
 
 require('dotenv').config({ path: `${__dirname}/../.env` });
@@ -29,11 +31,11 @@ async function run() {
 
   await connectDB();
 
-  const query = { status: INSIGHT_STATUS.GENERATED };
+  const query = { status: { $in: [INSIGHT_STATUS.GENERATED, INSIGHT_STATUS.STALE ?? 'stale'] } };
   if (sport) query.sport = sport;
 
   const insights = await Insight.find(query)
-    .select('_id playerName statType sport edgePercentage confidenceScore isHighConfidence dataQuality baselineGamesCount')
+    .select('_id playerName statType sport edgePercentage confidenceScore isHighConfidence dataQuality baselineGamesCount hitsPerG tbPerG rbiPerG')
     .lean();
 
   console.log(`\nRunning guardrail sweep on ${insights.length} insights${sport ? ` (sport: ${sport})` : ''}${dryRun ? ' [DRY RUN]' : ''}…`);
@@ -67,6 +69,17 @@ async function run() {
     // Guardrail 4 — HC sanity (HC true but conf below threshold)
     if (ins.isHighConfidence && (ins.confidenceScore ?? 0) < HC_THRESHOLD) {
       updates.isHighConfidence = false;
+    }
+
+    // Guardrail 5 — Thin baseline (<20 games): cap confidence at 80
+    if (baseline < 20 && (ins.confidenceScore ?? 0) > 80) {
+      updates.confidenceScore = 80;
+    }
+
+    // Guardrail 6 — MLB null stats: all batter stats null → cannot be 'strong' quality
+    if (ins.sport === 'mlb' && ins.hitsPerG == null && ins.tbPerG == null &&
+        ins.rbiPerG == null && ins.dataQuality === 'strong') {
+      updates.dataQuality = 'moderate';
     }
 
     if (Object.keys(updates).length === 0) {
