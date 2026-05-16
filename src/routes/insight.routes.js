@@ -27,6 +27,9 @@ router.use(protect);
 // POST /api/insights/unlock — Unlock a new insight (deducts 1 credit)
 router.post('/unlock', validateInsightRequest, insightController.unlockInsight);
 
+// GET /api/insights/unlock-jobs/:jobId — Poll queue-backed unlock status
+router.get('/unlock-jobs/:jobId', insightController.getUnlockJobStatus);
+
 // GET /api/insights/my-history — Current user's unlocked insights
 router.get('/my-history', validatePagination, insightController.listMyHistory);
 

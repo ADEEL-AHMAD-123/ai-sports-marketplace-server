@@ -11,8 +11,9 @@
 const NHLStatsClient = require('./NHLStatsClient');
 
 function detectPlayoffContext(game) {
-  const start = game?.startTime ? new Date(game.startTime) : new Date();
-  const isPlayoff = NHLStatsClient.getGameType(start) === 3;
+  // Strict correctness: only mark playoff when the game itself is explicitly
+  // tagged as postseason by upstream provider data.
+  const isPlayoff = game?.isPlayoff === true;
   return {
     isPlayoff,
     intensity: isPlayoff

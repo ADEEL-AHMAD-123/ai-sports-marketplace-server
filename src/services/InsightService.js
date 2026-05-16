@@ -41,10 +41,11 @@ const { getAdapter } = require('./shared/adapterRegistry');
 const { getInjuryPromptContext, getPlayerInjuryStatus } = require('./injuryService');
 // Sport-specific insight pipelines — each sport's context enrichment isolated
 const SPORT_PIPELINES = {
-  nba: require('./sports/nba/NBAInsightPipeline'),
-  mlb: require('./sports/mlb/MLBInsightPipeline'),
-  nhl: require('./sports/nhl/NHLInsightPipeline'),
-  nfl: require('./sports/nfl/NFLInsightPipeline'),
+  nba:    require('./sports/nba/NBAInsightPipeline'),
+  mlb:    require('./sports/mlb/MLBInsightPipeline'),
+  nhl:    require('./sports/nhl/NHLInsightPipeline'),
+  nfl:    require('./sports/nfl/NFLInsightPipeline'),
+  soccer: require('./sports/soccer/SoccerInsightPipeline'),
 };
 const {
   INSIGHT_STATUS,
@@ -80,6 +81,66 @@ class InsightService {
         await User.findByIdAndUpdate(user._id, { $addToSet: { unlockedInsights: existing._id } });
         await Insight.findByIdAndUpdate(existing._id, { $inc: { unlockCount: 1 } });
       }
+      
+      // Apply guardrails retroactively to cached insights
+      // Track what changes so we can persist them back (findExisting uses .lean())
+      const edgeAbs = Math.abs(existing.edgePercentage || 0);
+      const guardrailUpdates = {};
+
+      // Weak edge (<5%) cannot be high confidence
+      if (edgeAbs < 5 && existing.isHighConfidence) {
+        existing.isHighConfidence = false;
+        guardrailUpdates.isHighConfidence = false;
+        logger.debug('[InsightService] Applied HC guardrail to cache hit (weak edge)', logCtx);
+      }
+      // If data quality is 'strong' but edge is weak (<5%), downgrade to moderate
+      if (edgeAbs < 5 && existing.dataQuality === 'strong') {
+        existing.dataQuality = 'moderate';
+        guardrailUpdates.dataQuality = 'moderate';
+        logger.debug('[InsightService] Applied dataQuality guardrail to cache hit (strong quality on weak edge)', logCtx);
+      }
+      // Weak edge (<5%) cannot have high confidence score
+      if (edgeAbs < 5 && existing.confidenceScore > 55) {
+        existing.confidenceScore = 55;
+        guardrailUpdates.confidenceScore = 55;
+        logger.debug('[InsightService] Applied confidence cap guardrail to cache hit (weak edge)', logCtx);
+      }
+      // Zero/near-zero edge (<0.5%) is no predictive edge — cap severely
+      if (edgeAbs < 0.5 && existing.confidenceScore > 30) {
+        existing.confidenceScore = 30;
+        existing.isHighConfidence = false;
+        guardrailUpdates.confidenceScore = 30;
+        guardrailUpdates.isHighConfidence = false;
+        logger.debug('[InsightService] Applied zero-edge guardrail to cache hit', logCtx);
+      }
+
+      // Extreme-edge outlier: edge >80% on thin baseline (<20 games) → downgrade quality
+      const existingBaseline = existing.baselineGamesCount ?? 30;
+      if (edgeAbs > 80 && existingBaseline < 20 && existing.dataQuality === 'strong') {
+        existing.dataQuality = 'moderate';
+        guardrailUpdates.dataQuality = 'moderate';
+        logger.debug('[InsightService] Applied outlier-edge guardrail to cache hit (extreme edge + thin baseline)', logCtx);
+      }
+
+      // Persist guardrail corrections back to DB (lean() object is not auto-saved)
+      if (Object.keys(guardrailUpdates).length > 0) {
+        await Insight.findByIdAndUpdate(existing._id, { $set: guardrailUpdates });
+        logger.info('[InsightService] Persisted guardrail corrections to DB', { ...logCtx, guardrailUpdates });
+      }
+      
+      // Try to refresh leagueContext with fresh game + sport context
+      try {
+        const game = await Game.findOne({ sport, oddsEventId: eventId }).lean();
+        const prop = await PlayerProp.findOne({ sport, oddsEventId: eventId, playerName, statType }).lean();
+        if (game && prop) {
+          const freshSportCtx = await this._getSportContext(sport, eventId, prop, game);
+          existing.leagueContext = this._buildLeagueContext({ sport, prop, game, sportCtx: freshSportCtx });
+          logger.debug('[InsightService] Refreshed leagueContext on cache hit', logCtx);
+        }
+      } catch (err) {
+        logger.debug('[InsightService] Cache leagueContext refresh skipped (non-critical)', { error: err.message });
+      }
+      
       return { insight: existing, creditDeducted: false };
     }
 
@@ -98,9 +159,12 @@ class InsightService {
     let resolvedId = apiSportsPlayerId;
     const adapter  = getAdapter(sport);
     let prop       = null;
+    // Pre-fetch game so soccer can use leagueId here; reused in Step 5 without a second DB hit.
+    let game = null;
+    try { game = await Game.findOne({ sport, oddsEventId: eventId }).lean(); } catch { /* non-fatal */ }
 
     try {
-      prop = await PlayerProp.findOne({ oddsEventId: eventId, playerName, statType }).lean();
+      prop = await PlayerProp.findOne({ sport, oddsEventId: eventId, playerName, statType }).lean();
 
       if (sport === 'mlb') {
         rawStats = await PlayerStatsSnapshotService.getPlayerStats({
@@ -109,14 +173,23 @@ class InsightService {
           isPitcher: statType === 'pitcher_strikeouts',
         }) || [];
       } else if (sport === 'nhl') {
-        // NHL: resolve player via team rosters from this game, then fetch official NHL game log.
-        rawStats = await adapter.fetchPlayerStats({
+        // Pass team names so the NHL roster resolver can identify the player on first fetch.
+        rawStats = await PlayerStatsSnapshotService.getPlayerStats({
+          sport,
           playerName,
-          homeTeamName: prop?.homeTeamName || null,
-          awayTeamName: prop?.awayTeamName || null,
+          homeTeamName: prop?.homeTeamName || game?.homeTeam?.name || null,
+          awayTeamName: prop?.awayTeamName || game?.awayTeam?.name || null,
+        }) || [];
+      } else if (sport === 'soccer') {
+        rawStats = await PlayerStatsSnapshotService.getPlayerStats({
+          sport,
+          playerName,
+          homeTeamName: prop?.homeTeamName || game?.homeTeam?.name || null,
+          awayTeamName: prop?.awayTeamName || game?.awayTeam?.name || null,
+          leagueId: game?.leagueId || null,
         }) || [];
       } else {
-        // NBA and others: use apiSportsPlayerId lookup
+        // NBA, NFL, and others: use apiSportsPlayerId lookup
         if (!resolvedId) {
           resolvedId = prop?.apiSportsPlayerId || null;
         }
@@ -170,10 +243,10 @@ class InsightService {
     let injuryContext = '';
     let storedInjuryStatus = null;
     let storedInjuryReason = null;
-    let game = null;
+    // game was pre-fetched before Step 3; only re-fetch if that attempt failed.
 
     try {
-      game = await Game.findOne({ oddsEventId: eventId }).lean();
+      if (!game) game = await Game.findOne({ sport, oddsEventId: eventId }).lean();
       const teamCtx = {
         leagueId: game?.leagueId,
         homeTeamName: game?.homeTeam?.name,
@@ -227,6 +300,7 @@ class InsightService {
     const goalieContext      = sportCtx.goalieContext    || null;
     const teamContext        = sportCtx.teamContext      || null;
     const playerSide         = sportCtx.playerSide       || null;
+    const hasReliableNhlSide = sport !== 'nhl' || playerSide === 'home' || playerSide === 'away';
     const isPlayoff          = sportCtx.isPlayoff        || false;
     const isBackToBack       = sportCtx.isBackToBack     || false;
 
@@ -244,7 +318,7 @@ class InsightService {
       defensiveContext: defensiveContext,  // NBA: opponent defensive stats
       parkContext:      parkContext,       // MLB: ballpark factors
       platoonContext:   platoonContext,    // MLB: L/R platoon splits
-      goalieContext,                       // NHL: opposing goalie SV% + tier
+      goalieContext: hasReliableNhlSide ? goalieContext : null, // NHL: only when side is confirmed
       teamContext,                         // NHL: PP%, shots-for/against, defense quality
       playerSide,                          // NHL: 'home' | 'away' for goalie assignment
       isPlayoff,                           // NHL: playoff pace adjustment
@@ -263,9 +337,19 @@ class InsightService {
     }
 
     // ── STEP 9: Parse + score + save ──────────────────────────────────────
-    const parsed = this._parseAIResponse(aiResponse.text);
+    let parsed = this._parseAIResponse(aiResponse.text);
     const { confidenceScore, edgePercentage, isHighConfidence, isBestValue } =
       this._calculateStrategyScores(processedStats, parsed, bettingLine, sport);
+    parsed = this._sanitizeParsedNarrative({
+      sport,
+      statType,
+      parsed,
+      processedStats,
+      confidenceScore,
+      edgePercentage,
+      bettingLine,
+    });
+    const recommendation = this._resolveRecommendation(parsed.recommendation, edgePercentage);
 
     const aiLogExpiresAt = new Date();
     aiLogExpiresAt.setDate(aiLogExpiresAt.getDate() + parseInt(process.env.AI_LOG_RETENTION_DAYS || '30', 10));
@@ -277,14 +361,23 @@ class InsightService {
       statType,
       marketType,
       bettingLine,
-      recommendation:    parsed.recommendation,
+      recommendation,
       injuryStatus:      storedInjuryStatus,
       injuryReason:      storedInjuryReason,
       insightSummary:    parsed.summary     || '',
       insightFactors:    parsed.factors     || [],
       insightRisks:      parsed.risks       || [],
       aiConfidenceLabel: parsed.confidence  || 'medium',
-      dataQuality:       parsed.dataQuality || 'moderate',
+      // Guardrail: if baseline is partial (< 30 games), downgrade to moderate
+      // Guardrail: extreme edge (>80%) on a thin baseline (<20 games) is likely an outlier — downgrade
+      dataQuality: (() => {
+        const q = parsed.dataQuality || 'moderate';
+        const baseline = processedStats?.baselineGamesCount ?? 30;
+        const absEd = Math.abs(scores?.edgePercentage ?? 0);
+        if (q === 'strong' && baseline < 30) return 'moderate';
+        if (q === 'strong' && absEd > 80 && baseline < 20) return 'moderate';
+        return q;
+      })(),
       insightText:       aiResponse.text,
       // Stat fields for InsightModal panels — saved flat so frontend reads directly
       // NBA fields
@@ -294,6 +387,7 @@ class InsightService {
       formThrees:         processedStats?.formThrees        ?? null,
       formPointsAssists:  processedStats?.formPointsAssists  ?? null,
       formMinutes:        processedStats?.formMinutes       ?? null,
+      avgPlusMinus:       processedStats?.avgPlusMinus      ?? null,
       formGamesCount:     processedStats?.formGamesCount    ?? 5,
       baselineStatAvg:    processedStats?.baselineStatAvg   ?? null,
       baselineMinutes:    processedStats?.baselineMinutes   ?? null,
@@ -406,11 +500,18 @@ class InsightService {
   // Sport-aware; safe to call with partial inputs.
   _buildLeagueContext({ sport, prop, game, sportCtx }) {
     if (!game) return null;
-    const playerSide   = sportCtx?.playerSide || prop?.playerTeam || null;
     const homeName     = game.homeTeam?.name || null;
     const awayName     = game.awayTeam?.name || null;
     const homeAbbr     = game.homeTeam?.abbreviation || null;
     const awayAbbr     = game.awayTeam?.abbreviation || null;
+    const propTeamAbbr = String(prop?.teamName || '').trim().toUpperCase() || null;
+    const inferredSide = propTeamAbbr && homeAbbr && awayAbbr
+      ? (propTeamAbbr === String(homeAbbr).toUpperCase() ? 'home'
+        : propTeamAbbr === String(awayAbbr).toUpperCase() ? 'away'
+        : null)
+      : null;
+    const rawSide = sportCtx?.playerSide || prop?.playerTeam || inferredSide || null;
+    const playerSide = rawSide === 'home' || rawSide === 'away' ? rawSide : null;
     const opponentName = playerSide === 'home' ? awayName
                        : playerSide === 'away' ? homeName : null;
     const opponentAbbr = playerSide === 'home' ? awayAbbr
@@ -430,17 +531,34 @@ class InsightService {
     };
 
     if (sport === 'nhl') {
-      const goalie = sportCtx?.goalieContext
-        ? (playerSide === 'home' ? sportCtx.goalieContext.awayGoalie : sportCtx.goalieContext.homeGoalie)
+      const statType = String(prop?.statType || '').toLowerCase();
+      const goalieRelevantStats = new Set(['goals', 'shots_on_goal']);
+      const shouldShowGoalie = goalieRelevantStats.has(statType);
+      const rawGoalie = sportCtx?.goalieContext
+        ? (playerSide === 'home' ? sportCtx.goalieContext.awayGoalie
+          : playerSide === 'away' ? sportCtx.goalieContext.homeGoalie
+          : null)
+        : null;
+      const goalieTeamAbbr = rawGoalie?.teamAbbrev ? String(rawGoalie.teamAbbrev).toUpperCase() : null;
+      const expectedOppAbbr = opponentAbbr ? String(opponentAbbr).toUpperCase() : null;
+      // Guardrail: suppress goalie context if the resolved goalie doesn't belong
+      // to the inferred opponent team for this player/game.
+      const goalie = (!shouldShowGoalie)
+        ? null
+        : (!rawGoalie || !goalieTeamAbbr || !expectedOppAbbr || goalieTeamAbbr === expectedOppAbbr)
+        ? rawGoalie
         : null;
       const team = sportCtx?.teamContext || null;
-      const oppTeamStats = team ? (playerSide === 'home' ? team.away : team.home) : null;
+      const oppTeamStats = team
+        ? (playerSide === 'home' ? team.away : playerSide === 'away' ? team.home : null)
+        : null;
       return {
         ...base,
         isPlayoff:    !!sportCtx?.isPlayoff,
         isBackToBack: !!sportCtx?.isBackToBack,
         goalie: goalie ? {
           name:            goalie.name || null,
+          teamAbbrev:      goalie.teamAbbrev || null,
           tier:            goalie.tier || null,
           seasonTier:      goalie.seasonTier || null,
           savePercentage:  goalie.savePercentage ?? null,
@@ -458,14 +576,16 @@ class InsightService {
           goalsAgainstPerGame: oppTeamStats.goalsAgainstPerGame ?? null,
         } : null,
         expectedShots: team?.expectedPace
-          ? (playerSide === 'home' ? team.expectedPace.homeExpectedShots : team.expectedPace.awayExpectedShots)
+          ? (playerSide === 'home' ? team.expectedPace.homeExpectedShots
+            : playerSide === 'away' ? team.expectedPace.awayExpectedShots
+            : null)
           : null,
       };
     }
 
     if (sport === 'nba') {
       const def = sportCtx?.defensiveContext || null;
-      const oppDef = def
+      const oppDef = def && (playerSide === 'home' || playerSide === 'away')
         ? (playerSide === 'home' ? def.awayTeamDef : def.homeTeamDef)
         : null;
       return {
@@ -511,6 +631,80 @@ class InsightService {
     return base;
   }
 
+  async refreshExistingInsightContext(insight) {
+    if (!insight?.sport || !insight?.eventId) return insight;
+
+    const pipeline = SPORT_PIPELINES[insight.sport];
+    if (!pipeline?.getInsightContext) return insight;
+
+    try {
+      const game = await Game.findOne({ sport: insight.sport, oddsEventId: insight.eventId }).lean();
+      if (!game) return insight;
+
+      const prop = await PlayerProp.findOne({
+        sport: insight.sport,
+        oddsEventId: insight.eventId,
+        playerName: insight.playerName,
+        statType: insight.statType,
+      }).lean();
+      if (!prop) return insight;
+
+      const sportCtx = await pipeline.getInsightContext(prop, game).catch(() => null);
+      if (!sportCtx) return insight;
+
+      const leagueContext = this._buildLeagueContext({
+        sport: insight.sport,
+        prop,
+        game,
+        sportCtx,
+      });
+
+      if (!leagueContext) return insight;
+
+      const patch = {
+        leagueContext,
+        isPlayoff: !!sportCtx?.isPlayoff,
+      };
+      const recommendation = this._resolveRecommendation(insight.recommendation, insight.edgePercentage);
+      if (recommendation && recommendation !== insight.recommendation) {
+        patch.recommendation = recommendation;
+      }
+      const normalizedCertainty = this._normalizeAiCertaintyBySignal(
+        insight.confidenceScore,
+        insight.aiConfidenceLabel
+      );
+      if (normalizedCertainty && normalizedCertainty !== insight.aiConfidenceLabel) {
+        patch.aiConfidenceLabel = normalizedCertainty;
+      }
+      const sanitizedNarrative = this._sanitizeExistingNarrative(insight);
+      if (sanitizedNarrative.summary !== insight.insightSummary) {
+        patch.insightSummary = sanitizedNarrative.summary;
+      }
+      if (JSON.stringify(sanitizedNarrative.factors) !== JSON.stringify(insight.insightFactors || [])) {
+        patch.insightFactors = sanitizedNarrative.factors;
+      }
+      if (insight.sport === 'nhl') {
+        patch.isBackToBack = !!sportCtx?.isBackToBack;
+        patch.playerTeam = sportCtx?.playerSide || prop?.playerTeam || insight.playerTeam || null;
+      }
+
+      const updated = await Insight.findByIdAndUpdate(
+        insight._id,
+        { $set: patch },
+        { new: true }
+      ).lean();
+
+      return updated || { ...insight, ...patch };
+    } catch (err) {
+      logger.debug('[InsightService] refreshExistingInsightContext skipped', {
+        insightId: insight?._id,
+        sport: insight?.sport,
+        error: err.message,
+      });
+      return insight;
+    }
+  }
+
   // ─── Pre-flight ────────────────────────────────────────────────────────────
 
   async _runPreflightCheck({ sport, eventId, playerName, statType, bettingLine }) {
@@ -538,11 +732,13 @@ class InsightService {
       }
 
       // Per-stat-type thresholds — tight lines (K props, goals) block on 0.5+ moves
-      // Larger-variance stats (pts, rebounds) use the global ODDS_CHANGE_THRESHOLD
+      // Soccer uses 1.0 since lower-liquidity markets have higher volatility
       const statThresholds = {
         pitcher_strikeouts: 0.5,
         threes:             0.5,
-        goals:              0.5,
+        goals:              1.0,  // Soccer goals: increased from 0.5 to 1.0 for volatile markets
+        assists:            1.0,  // Soccer assists: use global threshold
+        shots_on_target:    1.0,  // Soccer shots: use global threshold
       };
       const effectiveThreshold = statThresholds[statType] ?? ODDS_CHANGE_THRESHOLD;
       const lineChange = Math.abs(currentLine - bettingLine);
@@ -625,6 +821,112 @@ class InsightService {
       isHighConfidence: scores.isHighConfidence,
       isBestValue:      scores.isBestValue,
     };
+  }
+
+  _normalizeAiCertaintyBySignal(confidenceScore, label) {
+    const raw = String(label || 'medium').toLowerCase();
+    const normalized = ['low', 'medium', 'high'].includes(raw) ? raw : 'medium';
+    if (!Number.isFinite(confidenceScore)) return normalized;
+    if (confidenceScore < 35) return 'low';
+    if (confidenceScore < 60 && normalized === 'high') return 'medium';
+    return normalized;
+  }
+
+  _sanitizeParsedNarrative({
+    sport,
+    statType,
+    parsed,
+    processedStats,
+    confidenceScore,
+    edgePercentage,
+    bettingLine,
+  }) {
+    const next = {
+      ...parsed,
+      factors: Array.isArray(parsed?.factors) ? [...parsed.factors] : [],
+    };
+
+    next.confidence = this._normalizeAiCertaintyBySignal(confidenceScore, parsed?.confidence);
+
+    const weakSignal = (Number.isFinite(edgePercentage) && Math.abs(edgePercentage) < 8)
+      || (Number.isFinite(confidenceScore) && confidenceScore < 45);
+    if (weakSignal && typeof next.summary === 'string' && next.summary) {
+      next.summary = next.summary
+        .replace(/\bstrong\s+(under|over)\s+signal\b/gi, '$1 lean')
+        .replace(/\bstrong\s+signal\b/gi, 'lean')
+        .replace(/\bstrongly\b/gi, 'moderately');
+    }
+
+    if (sport === 'nhl') {
+      const type = String(statType || '').toLowerCase();
+      if (type === 'assists' || type === 'points') {
+        next.factors = next.factors.filter((f) => !/goalie/i.test(String(f || '')));
+      }
+
+      const form5 = Number(processedStats?.formStatAvg);
+      const form10 = Number(processedStats?.focusStatAvg);
+      const baseline = Number(processedStats?.baselineStatAvg);
+      const hasUpTrend = (Number.isFinite(form5) && Number.isFinite(form10) && form5 > form10)
+        || (Number.isFinite(form5) && Number.isFinite(baseline) && form5 > baseline);
+
+      if (hasUpTrend) {
+        next.factors = next.factors.filter((f) => !/(decline|downward|trending\s+down|falling|below\s+baseline)/i.test(String(f || '')));
+      }
+
+      if (!next.factors.length && Number.isFinite(form5) && Number.isFinite(bettingLine)) {
+        const leanWord = form5 >= bettingLine ? 'over' : 'under';
+        next.factors.push(`recent ${type || 'form'} trend leans ${leanWord.toUpperCase()} (${form5.toFixed(2)} vs line ${bettingLine})`);
+      }
+    }
+
+    return next;
+  }
+
+  _sanitizeExistingNarrative(insight) {
+    const factors = Array.isArray(insight?.insightFactors) ? [...insight.insightFactors] : [];
+    const weakSignal = (Number.isFinite(insight?.edgePercentage) && Math.abs(insight.edgePercentage) < 8)
+      || (Number.isFinite(insight?.confidenceScore) && insight.confidenceScore < 45);
+    let summary = String(insight?.insightSummary || '');
+
+    if (weakSignal && summary) {
+      summary = summary
+        .replace(/\bstrong\s+(under|over)\s+signal\b/gi, '$1 lean')
+        .replace(/\bstrong\s+signal\b/gi, 'lean')
+        .replace(/\bstrongly\b/gi, 'moderately');
+    }
+
+    if (insight?.sport === 'nhl') {
+      const type = String(insight?.statType || '').toLowerCase();
+      let nextFactors = factors;
+      if (type === 'assists' || type === 'points') {
+        nextFactors = nextFactors.filter((f) => !/goalie/i.test(String(f || '')));
+      }
+
+      const form5 = Number(insight?.formStatAvg);
+      const form10 = Number(insight?.focusStatAvg);
+      const baseline = Number(insight?.baselineStatAvg);
+      const hasUpTrend = (Number.isFinite(form5) && Number.isFinite(form10) && form5 > form10)
+        || (Number.isFinite(form5) && Number.isFinite(baseline) && form5 > baseline);
+
+      if (hasUpTrend) {
+        nextFactors = nextFactors.filter((f) => !/(decline|downward|trending\s+down|falling|below\s+baseline)/i.test(String(f || '')));
+      }
+
+      return { summary, factors: nextFactors };
+    }
+
+    return { summary, factors };
+  }
+
+  _resolveRecommendation(currentRecommendation, edgePercentage) {
+    const rec = typeof currentRecommendation === 'string'
+      ? currentRecommendation.toLowerCase()
+      : null;
+
+    if (!Number.isFinite(edgePercentage)) return rec;
+    if (edgePercentage > 0) return 'over';
+    if (edgePercentage < 0) return 'under';
+    return rec;
   }
 
   // ─── Credit ────────────────────────────────────────────────────────────────

@@ -12,7 +12,7 @@
 
 const { Game, GAME_STATUS } = require('../../../models/Game.model');
 const PlayerProp             = require('../../../models/PlayerProp.model');
-const StrategyService        = require('../../../services/StrategyService');
+const { scoreSport }        = require('../../../services/queue/ScoringDispatcherService');
 const { getAdapter }         = require('../../../services/shared/adapterRegistry');
 const { cacheDel }           = require('../../../config/redis');
 const logger                 = require('../../../config/logger');
@@ -120,7 +120,7 @@ async function run() {
     totalUpserted += bulkOps.length;
   }
 
-  await StrategyService.scoreAllPropsForSport(SPORT);
+  await scoreSport(SPORT, 'nhl.propWatcher');
 
   const dateKey = new Date().toISOString().split('T')[0];
   await cacheDel(`schedule:${SPORT}:${dateKey}`);

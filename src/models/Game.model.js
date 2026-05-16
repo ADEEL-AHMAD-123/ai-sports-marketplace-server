@@ -91,6 +91,19 @@ const gameSchema = new mongoose.Schema(
       index: true,
     },
 
+    // Explicit postseason marker from provider data.
+    // IMPORTANT: This is NOT inferred by date/standings heuristics.
+    isPlayoff: {
+      type: Boolean,
+      default: false,
+    },
+
+    // Optional round label when provider exposes it (e.g. "Round 1").
+    playoffRound: {
+      type: String,
+      default: null,
+    },
+
     status: {
       type: String,
       enum: Object.values(GAME_STATUS),

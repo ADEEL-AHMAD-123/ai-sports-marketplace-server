@@ -18,9 +18,10 @@ const { getActiveSports } = require('../services/shared/adapterRegistry');
 const { getInjuryStatusesForGame, isInjurySportSupported } = require('../services/injuryService');
 const logger = require('../config/logger');
 
-const DEFAULT_SCHEDULE = '*/5 * * * *';
+const DEFAULT_SCHEDULE = '1-59/5 * * * *';
 const LOOKAHEAD_MINUTES = parseInt(process.env.INJURY_REFRESH_LOOKAHEAD_MINUTES || '120', 10);
 const STALE_MINUTES = parseInt(process.env.INJURY_REFRESH_STALE_MINUTES || '15', 10);
+let injuryRefreshRunning = false;
 
 const _normalizePlayerNameKey = (name = '') => String(name)
   .toLowerCase()
@@ -74,6 +75,18 @@ const runInjuryRefreshCycle = async () => {
 
 const _refreshGameInjuries = async (sport, game, now = new Date()) => {
   const staleBefore = new Date(now.getTime() - (STALE_MINUTES * 60 * 1000));
+  const props = await PlayerProp.find({
+    sport,
+    oddsEventId: game.oddsEventId,
+  })
+    .select('_id playerName isAvailable injuryUpdatedAt injuryStatus injuryReason injurySeverity')
+    .lean();
+
+  if (!props.length) return 0;
+
+  const staleProps = props.filter((prop) => !(prop.injuryUpdatedAt && prop.injuryUpdatedAt > staleBefore));
+  if (!staleProps.length) return 0;
+
   const injuryByPlayer = await getInjuryStatusesForGame(
     {
       leagueId: game.leagueId,
@@ -87,20 +100,8 @@ const _refreshGameInjuries = async (sport, game, now = new Date()) => {
     sport
   );
 
-  const props = await PlayerProp.find({
-    sport,
-    oddsEventId: game.oddsEventId,
-  })
-    .select('_id playerName isAvailable injuryUpdatedAt injuryStatus injuryReason injurySeverity')
-    .lean();
-
-  if (!props.length) return 0;
-
   const bulkOps = [];
-  for (const prop of props) {
-    // Refresh only stale injury fields.
-    if (prop.injuryUpdatedAt && prop.injuryUpdatedAt > staleBefore) continue;
-
+  for (const prop of staleProps) {
     const injury = injuryByPlayer.get(_normalizePlayerNameKey(prop.playerName)) || null;
     const nextStatus = injury?.status || null;
     const nextReason = injury?.reason || null;
@@ -132,6 +133,23 @@ const _refreshGameInjuries = async (sport, game, now = new Date()) => {
   return (result.modifiedCount || 0) + (result.upsertedCount || 0);
 };
 
+const runInjuryRefreshWithLock = async () => {
+  if (injuryRefreshRunning) {
+    logger.warn('⏭️  [InjuryRefresh] Previous cycle still active, skipping overlap trigger');
+    return { skipped: true };
+  }
+
+  injuryRefreshRunning = true;
+  const startedAt = Date.now();
+  try {
+    await runInjuryRefreshCycle();
+    return { skipped: false };
+  } finally {
+    injuryRefreshRunning = false;
+    logger.debug('🔓 [InjuryRefresh] Cycle lock released', { durationMs: Date.now() - startedAt });
+  }
+};
+
 const registerInjuryRefreshJob = () => {
   if (process.env.CRON_INJURY_REFRESH_ENABLED !== 'true') {
     logger.info('⏭️  [InjuryRefresh] Cron disabled via CRON_INJURY_REFRESH_ENABLED=false');
@@ -143,7 +161,7 @@ const registerInjuryRefreshJob = () => {
   cron.schedule(schedule, async () => {
     logger.info('⏰ [InjuryRefresh] Cron triggered');
     try {
-      await runInjuryRefreshCycle();
+      await runInjuryRefreshWithLock();
     } catch (err) {
       logger.error('❌ [InjuryRefresh] Cron cycle failed', { error: err.message });
     }

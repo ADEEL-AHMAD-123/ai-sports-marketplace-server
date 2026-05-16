@@ -10,9 +10,60 @@
 const InsightService = require('../services/InsightService');
 const Insight = require('../models/Insight.model');
 const PlayerProp = require('../models/PlayerProp.model');
+const JobQueueService = require('../services/queue/JobQueueService');
 const { HTTP_STATUS, CREDITS, INSIGHT_STATUS } = require('../config/constants');
 const { AppError } = require('../middleware/errorHandler.middleware');
 const logger = require('../config/logger');
+
+const _handleInsightResult = ({ result, bettingLine, user, res, userId }) => {
+  // Pre-flight check failed (odds changed or market closed)
+  if (result.preflightFailed) {
+    const requestedLine = parseFloat(bettingLine);
+    const currentLine = typeof result.currentLine === 'number' ? result.currentLine : null;
+    return res.status(HTTP_STATUS.CONFLICT).json({
+      success: false,
+      message: result.reason || 'Odds have changed. Please refresh and try again.',
+      preflightFailed: true,
+      creditDeducted: false,
+      currentLine,
+      requestedLine: Number.isFinite(requestedLine) ? requestedLine : null,
+      lineDelta: currentLine != null && Number.isFinite(requestedLine)
+        ? parseFloat((currentLine - requestedLine).toFixed(2))
+        : null,
+    });
+  }
+
+  // AI or data fetch failed
+  if (!result.insight) {
+    if (result.injuryInfo?.skip) {
+      return res.status(HTTP_STATUS.UNPROCESSABLE).json({
+        success: false,
+        message: result.error || 'Insight not generated due to player injury status.',
+        creditDeducted: false,
+        injuryInfo: result.injuryInfo,
+      });
+    }
+
+    throw new AppError(
+      result.error || 'Failed to generate insight. Please try again.',
+      HTTP_STATUS.INTERNAL_ERROR
+    );
+  }
+
+  logger.info('✅ [InsightController] Insight unlocked', {
+    userId,
+    insightId: result.insight._id,
+    creditDeducted: result.creditDeducted,
+  });
+
+  return res.status(HTTP_STATUS.OK).json({
+    success: true,
+    message: result.creditDeducted ? 'Insight unlocked!' : 'Insight retrieved from cache',
+    creditDeducted: result.creditDeducted,
+    remainingCredits: result.creditDeducted ? user.credits - CREDITS.COST_PER_INSIGHT : user.credits,
+    insight: result.insight,
+  });
+};
 
 // ─── Unlock Insight ────────────────────────────────────────────────────────────
 
@@ -51,6 +102,8 @@ const unlockInsight = async (req, res, next) => {
     });
 
     if (existingInsight && user.hasUnlockedInsight(existingInsight._id)) {
+      const refreshedInsight = await InsightService.refreshExistingInsightContext(existingInsight);
+
       logger.info('♻️  [InsightController] Returning previously unlocked insight for free', {
         userId: user._id,
         insightId: existingInsight._id,
@@ -60,7 +113,7 @@ const unlockInsight = async (req, res, next) => {
         success: true,
         message: 'Insight retrieved (already unlocked)',
         creditDeducted: false,
-        insight: existingInsight,
+        insight: refreshedInsight,
       });
     }
 
@@ -79,6 +132,43 @@ const unlockInsight = async (req, res, next) => {
     }
 
     // ── Generate or retrieve insight ────────────────────────────────────────
+    const queueEnabled = JobQueueService.isEnabled()
+      && String(process.env.INSIGHT_QUEUE_ENABLED || 'true').toLowerCase() === 'true';
+
+    if (queueEnabled) {
+      const queuedJob = await JobQueueService.enqueueInsightGeneration({
+        userId: String(user._id),
+        sport,
+        eventId,
+        playerName,
+        statType,
+        bettingLine: parseFloat(bettingLine),
+        marketType,
+      });
+
+      if (queuedJob) {
+        const waitMs = Math.max(1000, parseInt(process.env.INSIGHT_QUEUE_WAIT_MS || '18000', 10));
+        const queuedResult = await JobQueueService.waitForInsightResult(queuedJob, waitMs);
+
+        if (!queuedResult) {
+          return res.status(HTTP_STATUS.CREATED).json({
+            success: true,
+            pending: true,
+            message: 'Insight generation queued. Poll job status endpoint for completion.',
+            jobId: queuedJob.id,
+          });
+        }
+
+        return _handleInsightResult({
+          result: queuedResult,
+          bettingLine,
+          user,
+          res,
+          userId: user._id,
+        });
+      }
+    }
+
     const result = await InsightService.generateInsight({
       sport,
       eventId,
@@ -89,52 +179,59 @@ const unlockInsight = async (req, res, next) => {
       user,
     });
 
-    // Pre-flight check failed (odds changed or market closed)
-    if (result.preflightFailed) {
-      const requestedLine = parseFloat(bettingLine);
-      const currentLine = typeof result.currentLine === 'number' ? result.currentLine : null;
-      return res.status(HTTP_STATUS.CONFLICT).json({
-        success: false,
-        message: result.reason || 'Odds have changed. Please refresh and try again.',
-        preflightFailed: true,
-        creditDeducted: false,
-        currentLine,
-        requestedLine: Number.isFinite(requestedLine) ? requestedLine : null,
-        lineDelta: currentLine != null && Number.isFinite(requestedLine)
-          ? parseFloat((currentLine - requestedLine).toFixed(2))
-          : null,
-      });
-    }
-
-    // AI or data fetch failed
-    if (!result.insight) {
-      if (result.injuryInfo?.skip) {
-        return res.status(HTTP_STATUS.UNPROCESSABLE).json({
-          success: false,
-          message: result.error || 'Insight not generated due to player injury status.',
-          creditDeducted: false,
-          injuryInfo: result.injuryInfo,
-        });
-      }
-
-      throw new AppError(
-        result.error || 'Failed to generate insight. Please try again.',
-        HTTP_STATUS.INTERNAL_ERROR
-      );
-    }
-
-    logger.info('✅ [InsightController] Insight unlocked', {
+    return _handleInsightResult({
+      result,
+      bettingLine,
+      user,
+      res,
       userId: user._id,
-      insightId: result.insight._id,
-      creditDeducted: result.creditDeducted,
     });
+  } catch (err) {
+    next(err);
+  }
+};
 
-    res.status(HTTP_STATUS.OK).json({
+const getUnlockJobStatus = async (req, res, next) => {
+  try {
+    const { jobId } = req.params;
+
+    if (!JobQueueService.isEnabled()) {
+      throw new AppError('Insight queue is not enabled.', HTTP_STATUS.BAD_REQUEST);
+    }
+
+    const status = await JobQueueService.getInsightJobStatus(jobId);
+    if (!status) {
+      throw new AppError('Job not found', HTTP_STATUS.NOT_FOUND);
+    }
+
+    const ownerId = status?.data?.userId ? String(status.data.userId) : null;
+    if (ownerId && ownerId !== String(req.user._id)) {
+      throw new AppError('You do not have permission to access this job.', HTTP_STATUS.FORBIDDEN);
+    }
+
+    // Hide internal aiLog when job is complete
+    const safeResult = status?.result?.insight
+      ? {
+          ...status.result,
+          insight: (() => {
+            const { aiLog, ...rest } = status.result.insight;
+            return rest;
+          })(),
+        }
+      : status.result;
+
+    return res.status(HTTP_STATUS.OK).json({
       success: true,
-      message: result.creditDeducted ? 'Insight unlocked!' : 'Insight retrieved from cache',
-      creditDeducted: result.creditDeducted,
-      remainingCredits: result.creditDeducted ? user.credits - CREDITS.COST_PER_INSIGHT : user.credits,
-      insight: result.insight,
+      job: {
+        id: status.id,
+        state: status.state,
+        failedReason: status.failedReason,
+        attemptsMade: status.attemptsMade,
+        createdAt: status.createdAt,
+        processedAt: status.processedAt,
+        finishedAt: status.finishedAt,
+      },
+      result: safeResult || null,
     });
   } catch (err) {
     next(err);
@@ -359,6 +456,7 @@ const getFeaturedRecent = async (req, res, next) => {
 
 module.exports = {
   unlockInsight,
+  getUnlockJobStatus,
   getInsight,
   listInsights,
   listMyHistory,

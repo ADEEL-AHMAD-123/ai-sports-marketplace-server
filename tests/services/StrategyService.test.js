@@ -72,16 +72,47 @@ describe('StrategyService', () => {
     ];
 
     PlayerProp.find.mockReturnValue({
-      lean: jest.fn().mockResolvedValue(props),
+      populate: jest.fn().mockReturnValue({
+        lean: jest.fn().mockResolvedValue(props),
+      }),
     });
+
+    PlayerStatsSnapshotService.getPlayerStats.mockResolvedValue(mockStats);
+    PlayerProp.bulkWrite = jest.fn().mockResolvedValue({});
 
     const result = await StrategyService.scoreAllPropsForSport('nba');
 
-    // New behaviour: adapter.fetchPlayerStats called once per prop (not deduplicated at this layer).
-    // LeBron has 2 props (points + assists) → 2 calls; Curry has 1 → 1 call = 3 total.
-    expect(mockAdapter.fetchPlayerStats).toHaveBeenCalledTimes(3);
-    expect(mockAdapter.fetchPlayerStats).toHaveBeenCalledWith({ playerId: 2544 });
-    expect(mockAdapter.fetchPlayerStats).toHaveBeenCalledWith({ playerId: 115 });
+    // New behaviour: PlayerStatsSnapshotService is called once per unique fetch key.
+    // LeBron has 2 props but same playerId, so grouped into one fetch + Curry = 2 total.
+    expect(PlayerStatsSnapshotService.getPlayerStats).toHaveBeenCalledTimes(2);
+    expect(PlayerStatsSnapshotService.getPlayerStats).toHaveBeenCalledWith({ sport: 'nba', playerId: 2544 });
+    expect(PlayerStatsSnapshotService.getPlayerStats).toHaveBeenCalledWith({ sport: 'nba', playerId: 115 });
     expect(result).toEqual(expect.objectContaining({ failed: 0 }));
+  });
+
+  it('uses league-profile confidence margins for NBA lines', () => {
+    const result = StrategyService.computeScores(
+      {
+        focusStatAvg: 28.4,
+        recentStatValues: [30, 28, 27, 31, 26],
+      },
+      25.5,
+      { sport: 'nba', statType: 'points' }
+    );
+
+    // NBA profile uses wider strong/normal margins, so this lands at 74.
+    expect(result.confidenceScore).toBe(74);
+    expect(result.isHighConfidence).toBe(true);
+  });
+
+  it('uses sport-specific edge-to-confidence tiers on fallback', () => {
+    const result = StrategyService.computeScores(
+      { focusStatAvg: 0.65, recentStatValues: [] },
+      0.5,
+      { sport: 'mlb', statType: 'hits' }
+    );
+
+    // 30% edge should map to MLB tier score 82.
+    expect(result.confidenceScore).toBe(82);
   });
 });

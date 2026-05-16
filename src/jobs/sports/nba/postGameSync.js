@@ -14,7 +14,7 @@
 const { Game, GAME_STATUS }    = require('../../../models/Game.model');
 const PlayerProp                 = require('../../../models/PlayerProp.model');
 const Insight                    = require('../../../models/Insight.model');
-const InsightOutcomeService      = require('../../../services/InsightOutcomeService');
+const { gradeEvents }            = require('../../../services/queue/OutcomeDispatcherService');
 const PlayerStatsSnapshotService = require('../../../services/PlayerStatsSnapshotService');
 const { getAdapter }             = require('../../../services/shared/adapterRegistry');
 const { cacheDel }               = require('../../../config/redis');
@@ -72,7 +72,7 @@ async function run() {
     await PlayerProp.updateMany({ gameId: { $in: toFinal.map(g => g._id) } }, { $set: { isAvailable: false } });
 
     const finalEventIds = toFinal.map(g => g.oddsEventId).filter(Boolean);
-    const outcomeResult = await InsightOutcomeService.persistOutcomesForEvents(finalEventIds);
+      const outcomeResult = await gradeEvents(finalEventIds, { sport: SPORT, source: 'nba.postGameSync.finalize' });
     await PlayerStatsSnapshotService.markSportSnapshotsStale(SPORT);
 
     await cacheDel(`schedule:${SPORT}:${todayKey}`);
@@ -95,7 +95,7 @@ async function run() {
       eventId: { $in: ids }, status: 'generated', outcomeResult: { $in: ['unresolved', null] },
     });
     if (unresolvedCount > 0) {
-      const reGrade = await InsightOutcomeService.persistOutcomesForEvents(ids);
+        const reGrade = await gradeEvents(ids, { sport: SPORT, source: 'nba.postGameSync.regrade' });
       if (reGrade.updated > 0) {
         logger.info(`♻️  [${SPORT}PostGameSync] Re-graded ${reGrade.updated}/${unresolvedCount} unresolved`);
       }
@@ -109,7 +109,7 @@ async function run() {
   if (stale.length) {
     const staleEventIds = stale.map(g => g.oddsEventId).filter(Boolean);
 
-    await InsightOutcomeService.persistOutcomesForEvents(staleEventIds);
+      await gradeEvents(staleEventIds, { sport: SPORT, source: 'nba.postGameSync.stale' });
 
     const voidResult = await Insight.updateMany(
       {

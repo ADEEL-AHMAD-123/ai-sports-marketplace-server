@@ -535,7 +535,7 @@ async function getTeamStats(teamName) {
   const abbrev = getTeamAbbrev(teamName);
   if (!abbrev) return null;
 
-  const cacheKey = `nhl:teamstats:${abbrev}:v2`;
+  const cacheKey = `nhl:teamstats:${abbrev}:v3`;
   const cached   = await cacheGet(cacheKey);
   if (cached) return cached;
 
@@ -565,6 +565,7 @@ async function getTeamStats(teamName) {
     // Standings endpoint exposes PP%, PK%, GF/GA — try it for extra fields.
     let ppPct = null;
     let pkPct = null;
+    let clinchIndicator = null;
     let ppOpportunitiesPerGame = null;
     let pkOpportunitiesPerGame = null;
     try {
@@ -573,6 +574,7 @@ async function getTeamStats(teamName) {
         r => (r.teamAbbrev?.default || r.teamAbbrev) === abbrev
       );
       if (row) {
+        clinchIndicator = row.clinchIndicator || null;
         // Some seasons expose powerPlayPct; if absent we leave null.
         if (Number.isFinite(row.powerPlayPct))     ppPct = parseFloat((row.powerPlayPct * 100).toFixed(1));
         if (Number.isFinite(row.penaltyKillPct))   pkPct = parseFloat((row.penaltyKillPct * 100).toFixed(1));
@@ -593,6 +595,7 @@ async function getTeamStats(teamName) {
     const result = {
       teamName,
       abbrev,
+      clinchIndicator,
       gamesPlayed:             gp,
       ppPct,                   // null if not surfaced by standings
       pkPct,

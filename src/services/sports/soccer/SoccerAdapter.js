@@ -19,6 +19,7 @@ const ACTIVE_SOCCER_LEAGUES = Object.keys(SOCCER_LEAGUES);
 const STATS_CACHE_TTL = 6 * 60 * 60;
 const PLAYER_SEARCH_CACHE_TTL = 24 * 60 * 60;
 const TEAM_DIRECTORY_CACHE_TTL = 24 * 60 * 60;
+const LEAGUE_FETCH_CONCURRENCY = Math.max(1, parseInt(process.env.SOCCER_LEAGUE_FETCH_CONCURRENCY || '3', 10));
 
 const MARKET_MAP = {
   player_goals: 'goals',
@@ -44,12 +45,10 @@ class SoccerAdapter extends BaseAdapter {
   async fetchSchedule() {
     try {
       logger.info('📅 [SOCCER] Fetching schedule for all leagues...');
-      const allGames = [];
-
-      for (const leagueKey of this.activeLeasues) {
+      const seasonYear = this._defaultSeasonYear();
+      const leagueResults = await this._mapLeaguesWithConcurrency(async (leagueKey) => {
         const leagueConfig = SOCCER_LEAGUES[leagueKey];
         try {
-          const seasonYear = this._defaultSeasonYear();
           const leagueTeamDirectory = await this._getLeagueTeamDirectory(leagueConfig.apiSportsId, seasonYear);
           const response = await axios.get(
             `${this.oddsApiBase}/sports/${leagueConfig.oddsSportKey}/events`,
@@ -57,13 +56,15 @@ class SoccerAdapter extends BaseAdapter {
           );
           this._trackQuota(response.headers);
           const games = response.data || [];
-          const normalized = games.map((g) => this.normalizeGame(g, leagueConfig, leagueTeamDirectory));
-          allGames.push(...normalized);
           logger.info(`✅ [SOCCER] ${games.length} games from ${leagueConfig.name}`);
+          return games.map((g) => this.normalizeGame(g, leagueConfig, leagueTeamDirectory));
         } catch (err) {
           logger.warn(`⚠️ [SOCCER] Failed to fetch ${leagueConfig.name}`, { error: err.message });
+          return [];
         }
-      }
+      });
+
+      const allGames = leagueResults.flat();
 
       logger.info(`✅ [SOCCER] Total ${allGames.length} games across all leagues`);
       return allGames;
@@ -75,8 +76,7 @@ class SoccerAdapter extends BaseAdapter {
 
   async fetchFinalEventIds({ daysFrom = 3 } = {}) {
     try {
-      const allFinalIds = [];
-      for (const leagueKey of this.activeLeasues) {
+      const finalIdGroups = await this._mapLeaguesWithConcurrency(async (leagueKey) => {
         const leagueConfig = SOCCER_LEAGUES[leagueKey];
         try {
           const response = await axios.get(
@@ -88,15 +88,16 @@ class SoccerAdapter extends BaseAdapter {
           );
           this._trackQuota(response.headers);
           const games = Array.isArray(response.data) ? response.data : [];
-          const finalIds = games
+          return games
             .filter((g) => g?.completed === true && g?.id)
             .map((g) => String(g.id));
-          allFinalIds.push(...finalIds);
         } catch (err) {
           logger.warn(`⚠️ [SOCCER] fetchFinalEventIds failed for ${leagueConfig.name}`, { error: err.message });
+          return [];
         }
-      }
-      return allFinalIds;
+      });
+
+      return finalIdGroups.flat();
     } catch (err) {
       logger.warn('⚠️ [SOCCER] fetchFinalEventIds failed', { error: err.message });
       return [];
@@ -111,16 +112,28 @@ class SoccerAdapter extends BaseAdapter {
         : this.propMarkets.join(',');
 
       const sportKey = oddsSportKey || 'soccer_epl';
-      const fetchOdds = async (regions) => axios.get(
-        `${this.oddsApiBase}/sports/${sportKey}/events/${oddsEventId}/odds`,
+      const fetchOdds = async (regions) => this._requestWithRetry(
+        () => axios.get(
+          `${this.oddsApiBase}/sports/${sportKey}/events/${oddsEventId}/odds`,
+          {
+            params: {
+              apiKey: this.oddsApiKey,
+              regions,
+              markets: marketsParam,
+              oddsFormat: 'american',
+            },
+            timeout: 10000,
+          }
+        ),
         {
-          params: {
-            apiKey: this.oddsApiKey,
-            regions,
-            markets: marketsParam,
-            oddsFormat: 'american',
+          retries: 2,
+          baseDelayMs: 350,
+          shouldRetry: (err) => {
+            const status = err.response?.status;
+            return err.code === 'ECONNABORTED'
+              || !status
+              || [429, 500, 502, 503, 504].includes(status);
           },
-          timeout: 10000,
         }
       );
 
@@ -161,6 +174,26 @@ class SoccerAdapter extends BaseAdapter {
       }
       logger.error('❌ [SOCCER] fetchProps failed', { oddsEventId, error: err.message });
       throw err;
+    }
+  }
+
+  async _requestWithRetry(requestFn, { retries = 1, baseDelayMs = 250, shouldRetry = () => false } = {}) {
+    let attempt = 0;
+    while (true) {
+      try {
+        return await requestFn();
+      } catch (err) {
+        if (attempt >= retries || !shouldRetry(err)) throw err;
+        const waitMs = baseDelayMs * (2 ** attempt) + Math.floor(Math.random() * 120);
+        attempt++;
+        logger.warn('[SOCCER] Transient odds request failure — retrying', {
+          attempt,
+          retries,
+          waitMs,
+          error: err.message,
+        });
+        await new Promise((resolve) => setTimeout(resolve, waitMs));
+      }
     }
   }
 
@@ -325,6 +358,24 @@ class SoccerAdapter extends BaseAdapter {
     }
 
     return props;
+  }
+
+  async _mapLeaguesWithConcurrency(worker) {
+    const results = new Array(this.activeLeasues.length);
+    let cursor = 0;
+
+    const runNext = async () => {
+      while (cursor < this.activeLeasues.length) {
+        const index = cursor++;
+        results[index] = await worker(this.activeLeasues[index]);
+      }
+    };
+
+    await Promise.all(
+      Array.from({ length: Math.min(LEAGUE_FETCH_CONCURRENCY, this.activeLeasues.length) }, () => runNext())
+    );
+
+    return results;
   }
 
   async _resolvePlayer(playerName, seasonYear, teamIds = [], leagueId = null) {

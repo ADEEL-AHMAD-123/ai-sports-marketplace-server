@@ -26,6 +26,7 @@
 
 const NBA_PLAYOFF_START_MONTH = 3;  // April = month index 3 (0-based)
 const NBA_PLAYOFF_END_MONTH   = 5;  // June = month index 5
+const NBA_PLAYOFF_START_DAY_IN_APRIL = 15;
 
 /**
  * Detect if an NBA game is a playoff game.
@@ -39,9 +40,22 @@ function detectNBAGameContext(game) {
   if (!game) return _buildContext(false, null, null);
 
   const startTime = game.startTime ? new Date(game.startTime) : null;
-  const month     = startTime ? startTime.getMonth() : null; // 0-based
+  const month     = startTime ? startTime.getUTCMonth() : null; // 0-based
+  const day       = startTime ? startTime.getUTCDate() : null;
 
-  // Method 1: Title contains explicit playoff indicator
+  // Method 1: explicit provider marker (most reliable)
+  if (game.isPlayoff === true) {
+    const title = game.eventTitle || game.title || '';
+    const gameNum = _extractGameNumber(title);
+    const round = game.playoffRound || _extractRound(title);
+    return _buildContext(true, gameNum, round);
+  }
+
+  if (game.isPlayoff === false) {
+    return _buildContext(false, null, null);
+  }
+
+  // Method 2: Title contains explicit playoff indicator
   const title = game.eventTitle || game.title || '';
   const isPlayoffByTitle = /playoff|play.?off|nba finals|conference final|conference semi|first round/i.test(title);
 
@@ -51,12 +65,15 @@ function detectNBAGameContext(game) {
     return _buildContext(true, gameNum, round);
   }
 
-  // Method 2: Date-based detection
-  // NBA playoffs reliably run from mid-April (month=3) through June (month=5)
-  // Regular season ends ~mid April, so late April onward = likely playoffs
+  // Method 3: Date-based fallback (strict)
+  // Guardrail: avoid misclassifying early-April regular season games.
   const isPlayoffByDate = month !== null
     && month >= NBA_PLAYOFF_START_MONTH
-    && month <= NBA_PLAYOFF_END_MONTH;
+    && month <= NBA_PLAYOFF_END_MONTH
+    && (
+      month > NBA_PLAYOFF_START_MONTH
+      || (day !== null && day >= NBA_PLAYOFF_START_DAY_IN_APRIL)
+    );
 
   if (isPlayoffByDate) {
     // Could be play-in (early April) or full playoffs — treat same way

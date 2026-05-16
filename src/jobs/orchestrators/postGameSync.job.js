@@ -17,6 +17,11 @@ const SYNCS = {
   soccer: require('../sports/soccer/postGameSync'),
 };
 
+const POST_GAME_SYNC_SCHEDULE = process.env.CRON_POST_GAME_SYNC_SCHEDULE || '5,20,35,50 * * * *';
+const POST_GAME_CLEANUP_SCHEDULE = process.env.CRON_POST_GAME_CLEANUP_SCHEDULE || '0 3 * * *';
+let postGameSyncRunning = false;
+let postGameCleanupRunning = false;
+
 const runPostGameSync = async (sport = null) => {
   logger.info('🔄 [PostGameSync] Starting lifecycle sync...');
 
@@ -80,28 +85,64 @@ const runArchiveAndPruneGraded = async () => {
   return result;
 };
 
+const runPostGameSyncWithLock = async () => {
+  if (postGameSyncRunning) {
+    logger.warn('⏭️  [PostGameSync] Previous lifecycle run still active, skipping overlap trigger');
+    return { skipped: true };
+  }
+
+  postGameSyncRunning = true;
+  const startedAt = Date.now();
+  try {
+    return await runPostGameSync();
+  } finally {
+    postGameSyncRunning = false;
+    logger.debug('🔓 [PostGameSync] Lifecycle lock released', { durationMs: Date.now() - startedAt });
+  }
+};
+
+const runDailyCleanupWithLock = async () => {
+  if (postGameCleanupRunning) {
+    logger.warn('⏭️  [PostGameSync] Previous cleanup run still active, skipping overlap trigger');
+    return { skipped: true };
+  }
+
+  postGameCleanupRunning = true;
+  const startedAt = Date.now();
+  try {
+    await runAILogCleanup();
+    await runExhaustedInsightPrune();
+    await runArchiveAndPruneGraded();
+    return { skipped: false };
+  } finally {
+    postGameCleanupRunning = false;
+    logger.debug('🔓 [PostGameSync] Cleanup lock released', { durationMs: Date.now() - startedAt });
+  }
+};
+
 const registerPostGameSyncJob = () => {
   if (process.env.CRON_POST_GAME_SYNC_ENABLED !== 'true') {
     logger.info('⏭️  [PostGameSync] Disabled');
     return;
   }
 
-  cron.schedule('*/15 * * * *', async () => {
-    try { await runPostGameSync(); }
+  cron.schedule(POST_GAME_SYNC_SCHEDULE, async () => {
+    try { await runPostGameSyncWithLock(); }
     catch (err) { logger.error('❌ [PostGameSync] Cron crashed', { error: err.message }); }
   });
 
-  cron.schedule('0 3 * * *', async () => {
+  cron.schedule(POST_GAME_CLEANUP_SCHEDULE, async () => {
     try {
-      await runAILogCleanup();
-      await runExhaustedInsightPrune();
-      await runArchiveAndPruneGraded();
+      await runDailyCleanupWithLock();
     } catch (err) {
       logger.error('❌ [PostGameSync] Daily cleanup crashed', { error: err.message });
     }
   });
 
-  logger.info('✅ [PostGameSync] Registered — every 15min (parallel per-sport) + 3AM cleanup (logs, retries, archive)');
+  logger.info('✅ [PostGameSync] Registered — staggered lifecycle + daily cleanup', {
+    lifecycleSchedule: POST_GAME_SYNC_SCHEDULE,
+    cleanupSchedule: POST_GAME_CLEANUP_SCHEDULE,
+  });
 };
 
 module.exports = {

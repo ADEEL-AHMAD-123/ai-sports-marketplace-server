@@ -5,7 +5,7 @@
 const { Game, GAME_STATUS } = require('../../../models/Game.model');
 const PlayerProp = require('../../../models/PlayerProp.model');
 const Insight = require('../../../models/Insight.model');
-const StrategyService = require('../../../services/StrategyService');
+const { scoreSport } = require('../../../services/queue/ScoringDispatcherService');
 const { getAdapter } = require('../../../services/shared/adapterRegistry');
 const { bulkResolvePlayerIds } = require('../../../utils/playerResolver');
 const NFLInjuryService = require('../../../services/sports/nfl/NFLInjuryService');
@@ -98,7 +98,7 @@ async function run() {
     totalUpserted += bulkOps.length;
   }
 
-  await StrategyService.scoreAllPropsForSport(SPORT);
+  await scoreSport(SPORT, 'nfl.propWatcher');
 
   const dateKey = new Date().toISOString().split('T')[0];
   await cacheDel(`schedule:${SPORT}:${dateKey}`);

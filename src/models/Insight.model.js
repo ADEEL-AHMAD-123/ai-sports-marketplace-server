@@ -264,6 +264,7 @@ const insightSchema = new mongoose.Schema(
     formThrees:         { type: Number, default: null },
     formPointsAssists:  { type: Number, default: null },
     formMinutes:        { type: Number, default: null },
+    avgPlusMinus:       { type: Number, default: null },
     baselineMinutes:    { type: Number, default: null },
     trueShootingPct:    { type: Number, default: null },
     effectiveFGPct:     { type: Number, default: null },

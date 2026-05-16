@@ -12,6 +12,9 @@ const { getAdapter, getActiveSports } = require('../services/shared/adapterRegis
 const { cacheDel } = require('../config/redis');
 const logger = require('../config/logger');
 
+const MORNING_SCRAPER_SCHEDULE = process.env.CRON_MORNING_SCRAPER_SCHEDULE || '0 8 * * *';
+let morningScraperRunning = false;
+
 const runMorningScraper = async () => {
   logger.info('📅 [MorningScraper] Starting daily schedule scrape...');
 
@@ -69,17 +72,33 @@ const runMorningScraper = async () => {
   return results;
 };
 
+const runMorningScraperWithLock = async () => {
+  if (morningScraperRunning) {
+    logger.warn('⏭️  [MorningScraper] Previous cycle still active, skipping overlap trigger');
+    return { skipped: true };
+  }
+
+  morningScraperRunning = true;
+  const startedAt = Date.now();
+  try {
+    return await runMorningScraper();
+  } finally {
+    morningScraperRunning = false;
+    logger.debug('🔓 [MorningScraper] Cycle lock released', { durationMs: Date.now() - startedAt });
+  }
+};
+
 const registerMorningScraperJob = () => {
   if (process.env.CRON_MORNING_SCRAPER_ENABLED !== 'true') {
     logger.info('⏭️  [MorningScraper] Disabled via env');
     return;
   }
-  cron.schedule('0 8 * * *', async () => {
+  cron.schedule(MORNING_SCRAPER_SCHEDULE, async () => {
     logger.info('⏰ [MorningScraper] Cron triggered');
-    try { await runMorningScraper(); }
+    try { await runMorningScraperWithLock(); }
     catch (err) { logger.error('❌ [MorningScraper] Cron crashed', { error: err.message }); }
   });
-  logger.info('✅ [MorningScraper] Cron registered — runs daily at 8:00 AM');
+  logger.info('✅ [MorningScraper] Cron registered', { schedule: MORNING_SCRAPER_SCHEDULE });
 };
 
 module.exports = { registerMorningScraperJob, runMorningScraper };

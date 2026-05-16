@@ -93,6 +93,10 @@ class NHLAdapter {
     const { getTeamAbbr, getTeamLogoUrl, getApiSportsLogoUrl } = require('../../shared/teamMaps');
     const home = rawGame.home_team;
     const away = rawGame.away_team;
+    // Only trust explicit provider postseason fields; no date/standings inference.
+    const isPlayoff = rawGame.playoff === true
+      || rawGame.postseason === true
+      || String(rawGame.season_type || '').toLowerCase() === 'playoffs';
     return {
       sport:       'nhl',
       league:      'NHL',
@@ -108,6 +112,8 @@ class NHLAdapter {
         logoUrl:      getTeamLogoUrl('nhl', away) || getApiSportsLogoUrl('nhl', away) || null,
       },
       startTime: new Date(rawGame.commence_time),
+      isPlayoff,
+      playoffRound: rawGame.playoff_round || rawGame.round || null,
       status:    'scheduled',
     };
   }

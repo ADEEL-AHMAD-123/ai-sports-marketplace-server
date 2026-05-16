@@ -119,6 +119,43 @@ function extractStat(row, statType, sport) {
     }
   }
 
+  if (sport === 'nfl') {
+    if (statType === 'rush_reception_yards') {
+      const rush = toNum(row?.rushing?.yards ?? row?.rushingYards ?? row?.rushYards);
+      const rec  = toNum(row?.receiving?.yards ?? row?.receivingYards ?? row?.recYards);
+      if (Number.isFinite(rush) && Number.isFinite(rec)) return rush + rec;
+      if (Number.isFinite(rush)) return rush;
+      if (Number.isFinite(rec))  return rec;
+      return null;
+    }
+    const nflMap = {
+      passing_yards:   [['passing', 'yards'], ['passingYards'],  ['passYards']],
+      rushing_yards:   [['rushing', 'yards'], ['rushingYards'],  ['rushYards']],
+      receiving_yards: [['receiving', 'yards'], ['receivingYards'], ['recYards']],
+      receptions:      [['receiving', 'receptions'], ['receiving', 'recp'], ['receptions']],
+      pass_tds:        [['passing', 'touchdowns'], ['passTD'], ['passTds']],
+    };
+    for (const paths of nflMap[statType] || [[statType]]) {
+      const val = paths.reduce((acc, k) => (acc == null ? undefined : acc[k]), row);
+      const num = toNum(val);
+      if (Number.isFinite(num)) return num;
+    }
+    return null;
+  }
+
+  if (sport === 'soccer') {
+    const soccerMap = {
+      goals:           ['goals'],
+      assists:         ['assists'],
+      shots_on_target: ['shots_on_target', 'shotsOnTarget', 'sot'],
+    };
+    for (const key of soccerMap[statType] || [statType]) {
+      const value = toNum(row[key]);
+      if (Number.isFinite(value)) return value;
+    }
+    return null;
+  }
+
   return null;
 }
 
@@ -275,7 +312,7 @@ class InsightOutcomeService {
         : null;
     };
 
-    const bySportRows = ['nba', 'mlb', 'nhl'].map(sport =>
+    const bySportRows = ['nba', 'mlb', 'nhl', 'nfl', 'soccer'].map(sport =>
       buildBandSummary(resolved.filter(r => r.sport === sport), sport)
     );
 
@@ -336,36 +373,37 @@ class InsightOutcomeService {
     const eventIds = [...new Set(insights.map(i => i.eventId).filter(Boolean))];
 
     const games = await Game.find({ oddsEventId: { $in: eventIds } })
-      .select('oddsEventId startTime status').lean();
+      .select('oddsEventId startTime status leagueId homeTeam awayTeam sport').lean();
     const gameByEvent = new Map(games.map(g => [g.oddsEventId, g]));
 
     // FIX 2: Build player ID lookup from BOTH PlayerProp AND PlayerCache
     // PlayerProp may be deleted after 6h; PlayerCache is permanent
-    const nbaInsights = insights.filter(i => i.sport === 'nba');
+    const idBasedInsights = insights.filter(i => i.sport === 'nba' || i.sport === 'nfl');
 
     // First: try PlayerProp (faster, more specific)
-    const props = nbaInsights.length
+    const props = idBasedInsights.length
       ? await PlayerProp.find({
-          oddsEventId: { $in: [...new Set(nbaInsights.map(i => i.eventId))] },
-          playerName:  { $in: [...new Set(nbaInsights.map(i => i.playerName))] },
-        }).select('oddsEventId playerName statType apiSportsPlayerId').lean()
+          sport: { $in: ['nba', 'nfl'] },
+          oddsEventId: { $in: [...new Set(idBasedInsights.map(i => i.eventId))] },
+          playerName:  { $in: [...new Set(idBasedInsights.map(i => i.playerName))] },
+        }).select('sport oddsEventId playerName statType apiSportsPlayerId').lean()
       : [];
 
     const propIdByKey = new Map(
-      props.map(p => [`${p.oddsEventId}::${p.playerName}::${p.statType}`, p.apiSportsPlayerId])
+      props.map(p => [`${p.sport}::${p.oddsEventId}::${p.playerName}::${p.statType}`, p.apiSportsPlayerId])
     );
 
     // Second: build PlayerCache fallback — keyed by normalized playerName
-    const uniqueNBANames = [...new Set(nbaInsights.map(i => i.playerName).filter(Boolean))];
-    const cacheEntries   = uniqueNBANames.length
+    const uniqueIdSportNames = [...new Set(idBasedInsights.map(i => i.playerName).filter(Boolean))];
+    const cacheEntries   = uniqueIdSportNames.length
       ? await PlayerCache.find({
-          sport:       'nba',
-          oddsApiName: { $in: uniqueNBANames.map(n => n.toLowerCase().replace(/['.]/g, '').trim()) },
+          sport:       { $in: ['nba', 'nfl'] },
+          oddsApiName: { $in: uniqueIdSportNames.map(n => n.toLowerCase().replace(/['.]/g, '').trim()) },
         }).lean()
       : [];
 
     const playerCacheById = new Map(
-      cacheEntries.map(e => [e.oddsApiName, e.apiSportsId])
+      cacheEntries.map(e => [`${e.sport}::${e.oddsApiName}`, e.apiSportsId])
     );
 
     const statsCache = new Map();
@@ -389,7 +427,7 @@ class InsightOutcomeService {
         continue;
       }
 
-      const statsPayload = await this._getStatsForInsight(insight, propIdByKey, playerCacheById, statsCache);
+      const statsPayload = await this._getStatsForInsight(insight, propIdByKey, playerCacheById, statsCache, game);
       const stats        = statsPayload.stats || [];
       const targetDate  = new Date(game.startTime);
       let bestRow       = null;
@@ -450,7 +488,7 @@ class InsightOutcomeService {
     return rows;
   }
 
-  async _getStatsForInsight(insight, propIdByKey, playerCacheById, statsCache) {
+  async _getStatsForInsight(insight, propIdByKey, playerCacheById, statsCache, game = null) {
     const adapter = getAdapter(insight.sport);
 
     if (insight.sport === 'mlb') {
@@ -472,14 +510,14 @@ class InsightOutcomeService {
     if (insight.sport === 'nba') {
       // FIX 2: Try PlayerProp first, then PlayerCache fallback
       let playerId = propIdByKey.get(
-        `${insight.eventId}::${insight.playerName}::${insight.statType}`
+        `nba::${insight.eventId}::${insight.playerName}::${insight.statType}`
       );
 
       if (!playerId) {
         // Prop may have been deleted — fall back to PlayerCache
         const normName = (insight.playerName || '')
           .toLowerCase().replace(/['.]/g, '').trim();
-        playerId = playerCacheById.get(normName) || null;
+        playerId = playerCacheById.get(`nba::${normName}`) || null;
 
         if (playerId) {
           logger.debug('[OutcomeService] Used PlayerCache fallback for', {
@@ -519,6 +557,46 @@ class InsightOutcomeService {
         stats,
         reason: stats.length ? null : 'no_stat_found',
         sourceProvider: 'nhl-official',
+      };
+    }
+
+    if (insight.sport === 'nfl') {
+      // NFL uses apiSportsPlayerId like NBA; resolved from PropIdByKey map.
+      let playerId = propIdByKey.get(
+        `nfl::${insight.eventId}::${insight.playerName}::${insight.statType}`
+      );
+
+      if (!playerId) {
+        const normName = (insight.playerName || '')
+          .toLowerCase().replace(/['.]/g, '').trim();
+        playerId = playerCacheById.get(`nfl::${normName}`) || null;
+      }
+
+      if (!playerId) {
+        logger.warn('[OutcomeService] No player ID found for NFL insight', {
+          playerName: insight.playerName, statType: insight.statType,
+        });
+        return { stats: [], reason: 'player_not_found', sourceProvider: 'api-sports-nfl' };
+      }
+      const cacheKey = `nfl::${playerId}`;
+      if (!statsCache.has(cacheKey)) {
+        statsCache.set(cacheKey, await adapter.fetchPlayerStats({ playerId }) || []);
+      }
+      const stats = statsCache.get(cacheKey) || [];
+      return {
+        stats,
+        reason: stats.length ? null : 'no_stat_found',
+        sourceProvider: 'api-sports-nfl',
+      };
+    }
+
+    if (insight.sport === 'soccer') {
+      const SoccerOutcomeGrader = require('./sports/soccer/SoccerOutcomeGrader');
+      const stats = await SoccerOutcomeGrader.fetchStatsForInsight(insight, game, statsCache) || [];
+      return {
+        stats,
+        reason: stats.length ? null : 'no_stat_found',
+        sourceProvider: 'api-sports-soccer',
       };
     }
 

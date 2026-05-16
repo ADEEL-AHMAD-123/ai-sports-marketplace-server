@@ -8,7 +8,7 @@
 const { Game, GAME_STATUS }  = require('../../../models/Game.model');
 const PlayerProp              = require('../../../models/PlayerProp.model');
 const Insight                 = require('../../../models/Insight.model');
-const StrategyService         = require('../../../services/StrategyService');
+const { scoreSport }         = require('../../../services/queue/ScoringDispatcherService');
 const { getAdapter }          = require('../../../services/shared/adapterRegistry');
 const { enrichBatterPropsWithStarter } = require('../../../services/sports/mlb/MLBStarterService');
 const MLBInjuryService        = require('../../../services/sports/mlb/MLBInjuryService');
@@ -83,7 +83,7 @@ async function run() {
     totalUpserted += bulkOps.length;
   }
 
-  await StrategyService.scoreAllPropsForSport(SPORT);
+  await scoreSport(SPORT, 'mlb.propWatcher');
 
   const dateKey = new Date().toISOString().split('T')[0];
   await cacheDel(`schedule:${SPORT}:${dateKey}`);

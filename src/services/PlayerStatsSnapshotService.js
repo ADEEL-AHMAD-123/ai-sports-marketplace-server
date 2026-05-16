@@ -52,12 +52,24 @@ class PlayerStatsSnapshotService {
     return mongoose?.connection?.readyState === 1;
   }
 
-  _buildLookup({ sport, playerName, playerId, season, isPitcher = false }) {
+  _buildLookup({ sport, playerName, playerId, season, isPitcher = false, leagueId = null }) {
     const resolvedSeason = Number(season || getSeasonForSport(sport));
     const statsProfile = sport === 'mlb' && isPitcher ? 'pitcher' : 'standard';
-    const playerKey = sport === 'nba'
-      ? (playerId ? `id:${playerId}` : null)
-      : normalizePlayerNameKey(playerName); // mlb + nhl both look up by name
+
+    let playerKey;
+    if (sport === 'nba' || sport === 'nfl') {
+      // ID-based sports: stable key regardless of opponent
+      playerKey = playerId ? `id:${playerId}` : null;
+    } else if (sport === 'soccer') {
+      // Name-based, scoped per league so EPL and La Liga don't share a cache slot
+      const normName = normalizePlayerNameKey(playerName);
+      playerKey = normName
+        ? (leagueId ? `${normName}:league:${leagueId}` : normName)
+        : null;
+    } else {
+      // mlb, nhl — name-based
+      playerKey = normalizePlayerNameKey(playerName) || null;
+    }
 
     return {
       sport,
@@ -109,6 +121,13 @@ class PlayerStatsSnapshotService {
     const latestGameDate = extractLatestGameDate(rawStats);
 
     if (mongoReady) {
+      const sourceMap = {
+        nba:    'api-sports-nba',
+        nfl:    'api-sports-nfl',
+        nhl:    'nhl-official',
+        mlb:    'mlb-stats-api',
+        soccer: 'api-sports-soccer',
+      };
       await PlayerStatsSnapshot.findOneAndUpdate(
         {
           sport: lookup.sport,
@@ -120,7 +139,7 @@ class PlayerStatsSnapshotService {
           $set: {
             playerName: lookup.playerName,
             playerId: lookup.playerId,
-            source: lookup.sport === 'nba' ? 'api-sports-nba' : lookup.sport === 'nhl' ? 'api-sports-hockey' : 'mlb-stats-api',
+            source: sourceMap[lookup.sport] || lookup.sport,
             rawStats,
             lastGameDate: latestGameDate,
             stale: false,
@@ -146,12 +165,25 @@ class PlayerStatsSnapshotService {
       }
 
       if (lookup.sport === 'nhl') {
+        // Pass team names so the NHL roster resolver can identify the player
         return await adapter.fetchPlayerStats({
           playerName: params.playerName,
+          homeTeamName: params.homeTeamName || null,
+          awayTeamName: params.awayTeamName || null,
           season: lookup.season,
         });
       }
 
+      if (lookup.sport === 'soccer') {
+        return await adapter.fetchPlayerStats({
+          playerName: params.playerName,
+          homeTeamName: params.homeTeamName || null,
+          awayTeamName: params.awayTeamName || null,
+          leagueId: params.leagueId || null,
+        });
+      }
+
+      // NBA and NFL — require playerId
       if (!lookup.playerId) return [];
       return await adapter.fetchPlayerStats({
         playerId: lookup.playerId,

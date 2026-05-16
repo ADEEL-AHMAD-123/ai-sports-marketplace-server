@@ -17,6 +17,7 @@ const app = require('./src/app');
 const connectDB = require('./src/config/database');
 const { redisClient } = require('./src/config/redis');
 const logger = require('./src/config/logger');
+const JobQueueService = require('./src/services/queue/JobQueueService');
 
 // ── Cron Jobs ──────────────────────────────────────────────────────────────────
 const { registerMorningScraperJob } = require('./src/jobs/morningScraper.job');
@@ -60,6 +61,12 @@ const startServer = async () => {
     registerPostGameSyncJob();
     registerInjuryRefreshJob();
 
+    if (JobQueueService.isEnabled()) {
+      await JobQueueService.startWorkers();
+    } else {
+      logger.info('⏭️  Job queues disabled (JOB_QUEUE_ENABLED=false or REDIS disabled)');
+    }
+
     logger.info('⏰ Cron jobs registered');
 
     // ── Graceful shutdown handling ─────────────────────────────────────────
@@ -69,6 +76,11 @@ const startServer = async () => {
 
       server.close(async () => {
         logger.info('✅ HTTP server closed');
+
+        if (JobQueueService.isEnabled()) {
+          await JobQueueService.close();
+          logger.info('✅ Queue workers closed');
+        }
 
         // MongoDB and Redis shutdown are handled in their own modules
         // (database.js and redis.js both listen for SIGINT/SIGTERM)

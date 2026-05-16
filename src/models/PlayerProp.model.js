@@ -219,6 +219,13 @@ const playerPropSchema = new mongoose.Schema(
       type: Date,
       default: Date.now,
     },
+
+    // Last time StrategyService calculated scores for this prop
+    lastScoredAt: {
+      type: Date,
+      default: null,
+      index: true,
+    },
   },
   {
     timestamps: true,
@@ -250,6 +257,9 @@ playerPropSchema.index({
 
 // Game-level queries (show all props for a specific game)
 playerPropSchema.index({ gameId: 1, isAvailable: 1 });
+
+// Incremental scoring queries (find props changed since last scoring pass)
+playerPropSchema.index({ sport: 1, isAvailable: 1, lastUpdatedAt: 1, lastScoredAt: 1 });
 
 const PlayerProp = mongoose.model('PlayerProp', playerPropSchema);
 

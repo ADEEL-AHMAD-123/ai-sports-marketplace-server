@@ -5,7 +5,7 @@
 const { Game, GAME_STATUS } = require('../../../models/Game.model');
 const PlayerProp = require('../../../models/PlayerProp.model');
 const Insight = require('../../../models/Insight.model');
-const InsightOutcomeService = require('../../../services/InsightOutcomeService');
+const { gradeEvents } = require('../../../services/queue/OutcomeDispatcherService');
 const PlayerStatsSnapshotService = require('../../../services/PlayerStatsSnapshotService');
 const { getAdapter } = require('../../../services/shared/adapterRegistry');
 const { cacheDel } = require('../../../config/redis');
@@ -58,7 +58,7 @@ async function run() {
     await PlayerProp.updateMany({ gameId: { $in: toFinal.map((g) => g._id) } }, { $set: { isAvailable: false } });
 
     const finalEventIds = toFinal.map((g) => g.oddsEventId).filter(Boolean);
-    await InsightOutcomeService.persistOutcomesForEvents(finalEventIds);
+    await gradeEvents(finalEventIds, { sport: SPORT, source: 'soccer.postGameSync.finalize' });
     await PlayerStatsSnapshotService.markSportSnapshotsStale(SPORT);
 
     await cacheDel(`schedule:${SPORT}:${todayKey}`);
@@ -82,7 +82,7 @@ async function run() {
       outcomeResult: { $in: ['unresolved', null] },
     });
     if (unresolvedCount > 0) {
-      await InsightOutcomeService.persistOutcomesForEvents(ids);
+      await gradeEvents(ids, { sport: SPORT, source: 'soccer.postGameSync.regrade' });
     }
   }
 
@@ -94,7 +94,7 @@ async function run() {
   if (stale.length) {
     const staleEventIds = stale.map((g) => g.oddsEventId).filter(Boolean);
 
-    await InsightOutcomeService.persistOutcomesForEvents(staleEventIds);
+    await gradeEvents(staleEventIds, { sport: SPORT, source: 'soccer.postGameSync.stale' });
 
     await Insight.updateMany(
       {

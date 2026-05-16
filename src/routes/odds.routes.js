@@ -28,4 +28,13 @@ router.get(
   oddsController.getProps
 );
 
+// POST /api/odds/:sport/games/:eventId/refresh — Refresh props from live bookies
+router.post(
+  '/:sport/games/:eventId/refresh',
+  validateSportParam,
+  validateEventIdParam,
+  optionalAuth,
+  oddsController.refreshProps
+);
+
 module.exports = router;

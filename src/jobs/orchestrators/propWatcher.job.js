@@ -19,6 +19,9 @@ const WATCHERS = {
   soccer: require('../sports/soccer/propWatcher'),
 };
 
+const PROP_WATCHER_SCHEDULE = process.env.CRON_PROP_WATCHER_SCHEDULE || '2,32 * * * *';
+let propWatcherRunning = false;
+
 const runPropWatcher = async (sport = null) => {
   logger.info('👁️  [PropWatcher] Starting cycle...');
 
@@ -46,16 +49,34 @@ const runPropWatcher = async (sport = null) => {
   return summary;
 };
 
+const runPropWatcherWithLock = async () => {
+  if (propWatcherRunning) {
+    logger.warn('⏭️  [PropWatcher] Previous cycle still running, skipping overlap trigger');
+    return { skipped: true };
+  }
+
+  propWatcherRunning = true;
+  const startedAt = Date.now();
+  try {
+    return await runPropWatcher();
+  } finally {
+    propWatcherRunning = false;
+    logger.debug('🔓 [PropWatcher] Cycle lock released', { durationMs: Date.now() - startedAt });
+  }
+};
+
 const registerPropWatcherJob = () => {
   if (process.env.CRON_PROP_WATCHER_ENABLED !== 'true') {
     logger.info('⏭️  [PropWatcher] Disabled');
     return;
   }
-  cron.schedule('*/30 * * * *', async () => {
-    try { await runPropWatcher(); }
+  cron.schedule(PROP_WATCHER_SCHEDULE, async () => {
+    try { await runPropWatcherWithLock(); }
     catch (err) { logger.error('❌ [PropWatcher] Cron crashed', { error: err.message }); }
   });
-  logger.info('✅ [PropWatcher] Registered — every 30 minutes (parallel per-sport)');
+  logger.info('✅ [PropWatcher] Registered — staggered schedule (parallel per-sport)', {
+    schedule: PROP_WATCHER_SCHEDULE,
+  });
 };
 
 module.exports = { registerPropWatcherJob, runPropWatcher };

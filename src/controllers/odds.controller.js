@@ -362,5 +362,113 @@ const _onlyGamesWithProps = (games) => {
   return games.filter((game) => (game?.hasProps === true) || ((game?.propCount || 0) > 0));
 };
 
-module.exports = { getSports, getGames, getProps };
+// ── Refresh Props ───────────────────────────────────────────────────────────
+// POST /api/odds/:sport/games/:eventId/refresh
+// Fetches fresh props directly from bookies API and updates the database.
+// Used when user hits "Odds moved too fast" error and clicks refresh.
+
+const refreshProps = async (req, res, next) => {
+  try {
+    const { sport, eventId } = req.params;
+
+    // Get game to fetch fresh props
+    const game = await Game.findOne({ sport, oddsEventId: eventId })
+      .select('_id oddsEventId oddsSportKey homeTeam awayTeam startTime')
+      .lean();
+
+    if (!game) {
+      return res.status(HTTP_STATUS.NOT_FOUND).json({
+        success: false,
+        message: 'Game not found.',
+      });
+    }
+
+    // Fetch fresh props from bookies API
+    const { getAdapter } = require('../services/shared/adapterRegistry');
+    const adapter = getAdapter(sport);
+
+    logger.info(`[OddsController] Refreshing props from bookies for ${sport}:${eventId}`);
+
+    const rawProps = await adapter.fetchProps(eventId, { oddsSportKey: game.oddsSportKey });
+
+    if (!rawProps || !rawProps.length) {
+      // Mark all props as unavailable if API returns no props
+      await PlayerProp.updateMany(
+        { sport, oddsEventId: eventId, isAvailable: true },
+        { $set: { isAvailable: false, lastUpdatedAt: new Date() } }
+      );
+      await Game.findByIdAndUpdate(game._id, { hasProps: false });
+
+      // Clear cache
+      await cacheDel(`${CACHE_KEYS.PROPS}:${sport}:${eventId}:all`);
+      await cacheDel(`${CACHE_KEYS.PROPS}:${sport}:${eventId}:highConfidence`);
+      await cacheDel(`${CACHE_KEYS.PROPS}:${sport}:${eventId}:bestValue`);
+
+      return res.status(HTTP_STATUS.OK).json({
+        success: true,
+        source: 'refresh',
+        message: 'Props no longer available from bookies.',
+        data: [],
+        refreshed: true,
+      });
+    }
+
+    // Upsert fresh props into database
+    const bulkOps = rawProps.map((rp) => {
+      const norm = adapter.normalizeProp(rp);
+      return {
+        updateOne: {
+          filter: { oddsEventId: norm.oddsEventId, playerName: norm.playerName, statType: norm.statType },
+          update: {
+            $set: {
+              ...norm,
+              gameId: game._id,
+              lastUpdatedAt: new Date(),
+              homeTeamName: game.homeTeam?.name || null,
+              awayTeamName: game.awayTeam?.name || null,
+              isAvailable: true,
+            },
+          },
+          upsert: true,
+        },
+      };
+    });
+
+    const bulkResult = await PlayerProp.bulkWrite(bulkOps, { ordered: false });
+
+    logger.info(`[OddsController] Refreshed ${bulkOps.length} props for ${sport}:${eventId}`);
+
+    // Update game hasProps flag
+    await Game.findByIdAndUpdate(game._id, { hasProps: true, propsLastFetchedAt: new Date() });
+
+    // Clear all cache keys for this game
+    await cacheDel(`${CACHE_KEYS.PROPS}:${sport}:${eventId}:all`);
+    await cacheDel(`${CACHE_KEYS.PROPS}:${sport}:${eventId}:highConfidence`);
+    await cacheDel(`${CACHE_KEYS.PROPS}:${sport}:${eventId}:bestValue`);
+
+    // Fetch updated props to return to user
+    const query = { sport, oddsEventId: eventId, isAvailable: true };
+    const updatedProps = await PlayerProp.find(query)
+      .sort({ confidenceScore: -1, edgePercentage: -1 })
+      .select('-__v -apiSportsPlayerId')
+      .lean();
+
+    const withCtx = _enrichPropsWithGameContext(updatedProps, game);
+
+    res.status(HTTP_STATUS.OK).json({
+      success: true,
+      source: 'refresh',
+      message: `Refreshed ${updatedProps.length} props from bookies.`,
+      data: await _personalizeProps(withCtx, req.user),
+      refreshed: true,
+      upsertedCount: bulkResult.upsertedCount || 0,
+      modifiedCount: bulkResult.modifiedCount || 0,
+    });
+  } catch (err) {
+    logger.error('[OddsController] Refresh props error', { error: err.message });
+    next(err);
+  }
+};
+
+module.exports = { getSports, getGames, getProps, refreshProps };
 
