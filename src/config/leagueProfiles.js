@@ -165,6 +165,45 @@ const LEAGUE_PROFILES = {
     },
   },
 
+  nfl: {
+    scoring: {
+      highConfidenceThreshold: 57,
+      minEdgePercentage: 15,
+      minGamesByStatType: {
+        passing_yards: 4,
+        rushing_yards: 4,
+        receiving_yards: 4,
+        receptions: 4,
+        pass_tds: 4,
+        rush_reception_yards: 4,
+        default: 4,
+      },
+      confidence: {
+        maxWeight:              1.4,
+        strongWeight:           1.4,
+        normalWeight:           1.0,
+        weakWeight:             0.7,
+        strongMarginCap:        12.0,
+        normalMarginCap:        4.0,
+        normalMarginLineFactor: 0.5,
+      },
+      edgeToConfidenceTiers: [
+        { minAbsEdge: 20, score: 80 },
+        { minAbsEdge: 12, score: 65 },
+        { minAbsEdge: 6,  score: 50 },
+        { minAbsEdge: 0,  score: 30 },
+      ],
+      minEdgeByStatType: {
+        passing_yards: 12,
+        rushing_yards: 15,
+        receiving_yards: 15,
+        receptions: 12,
+        pass_tds: 20,
+        rush_reception_yards: 14,
+      },
+    },
+  },
+
   soccer: {
     scoring: {
       highConfidenceThreshold: 57,

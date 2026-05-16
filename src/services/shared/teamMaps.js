@@ -126,6 +126,44 @@ const NHL_TEAMS = {
   'Winnipeg Jets':         { id: 704,  abbr: 'wpg' },
 };
 
+// ─── NFL ─────────────────────────────────────────────────────────────────────
+const NFL_TEAMS = {
+  'Arizona Cardinals':      { abbr: 'ari', espn: 'ari' },
+  'Atlanta Falcons':        { abbr: 'atl', espn: 'atl' },
+  'Baltimore Ravens':       { abbr: 'bal', espn: 'bal' },
+  'Buffalo Bills':          { abbr: 'buf', espn: 'buf' },
+  'Carolina Panthers':      { abbr: 'car', espn: 'car' },
+  'Chicago Bears':          { abbr: 'chi', espn: 'chi' },
+  'Cincinnati Bengals':     { abbr: 'cin', espn: 'cin' },
+  'Cleveland Browns':       { abbr: 'cle', espn: 'cle' },
+  'Dallas Cowboys':         { abbr: 'dal', espn: 'dal' },
+  'Denver Broncos':         { abbr: 'den', espn: 'den' },
+  'Detroit Lions':          { abbr: 'det', espn: 'det' },
+  'Green Bay Packers':      { abbr: 'gb',  espn: 'gb' },
+  'Houston Texans':         { abbr: 'hou', espn: 'hou' },
+  'Indianapolis Colts':     { abbr: 'ind', espn: 'ind' },
+  'Jacksonville Jaguars':   { abbr: 'jax', espn: 'jax' },
+  'Kansas City Chiefs':     { abbr: 'kc',  espn: 'kc' },
+  'Las Vegas Raiders':      { abbr: 'lv',  espn: 'lv' },
+  'Los Angeles Chargers':   { abbr: 'lac', espn: 'lac' },
+  'LA Chargers':            { abbr: 'lac', espn: 'lac' },
+  'Los Angeles Rams':       { abbr: 'lar', espn: 'lar' },
+  'LA Rams':                { abbr: 'lar', espn: 'lar' },
+  'Miami Dolphins':         { abbr: 'mia', espn: 'mia' },
+  'Minnesota Vikings':      { abbr: 'min', espn: 'min' },
+  'New England Patriots':   { abbr: 'ne',  espn: 'ne' },
+  'New Orleans Saints':     { abbr: 'no',  espn: 'no' },
+  'New York Giants':        { abbr: 'nyg', espn: 'nyg' },
+  'New York Jets':          { abbr: 'nyj', espn: 'nyj' },
+  'Philadelphia Eagles':    { abbr: 'phi', espn: 'phi' },
+  'Pittsburgh Steelers':    { abbr: 'pit', espn: 'pit' },
+  'San Francisco 49ers':    { abbr: 'sf',  espn: 'sf' },
+  'Seattle Seahawks':       { abbr: 'sea', espn: 'sea' },
+  'Tampa Bay Buccaneers':   { abbr: 'tb',  espn: 'tb' },
+  'Tennessee Titans':       { abbr: 'ten', espn: 'ten' },
+  'Washington Commanders':  { abbr: 'was', espn: 'wsh' },
+};
+
 // ─── Soccer (Premier League) ───────────────────────────────────────────────
 // API-Sports football v3 team IDs (league 39)
 const SOCCER_TEAMS = {
@@ -172,7 +210,7 @@ const SOCCER_TEAMS = {
 
 // ─── Lookup helpers ───────────────────────────────────────────────────────────
 
-const TEAM_MAPS = { nba: NBA_TEAMS, mlb: MLB_TEAMS, nhl: NHL_TEAMS, soccer: SOCCER_TEAMS };
+const TEAM_MAPS = { nba: NBA_TEAMS, mlb: MLB_TEAMS, nhl: NHL_TEAMS, nfl: NFL_TEAMS, soccer: SOCCER_TEAMS };
 
 /**
  * Get API-Sports numeric team ID from full team name.
@@ -217,6 +255,6 @@ const getApiSportsLogoUrl = (sport, name) => {
 };
 
 module.exports = {
-  NBA_TEAMS, MLB_TEAMS, NHL_TEAMS, SOCCER_TEAMS,
+  NBA_TEAMS, MLB_TEAMS, NHL_TEAMS, NFL_TEAMS, SOCCER_TEAMS,
   getTeamId, getTeamAbbr, getTeamLogoUrl, getApiSportsLogoUrl,
 };

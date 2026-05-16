@@ -1,5 +1,10 @@
 /**
- * insight.routes.js — AI insight routes (all protected)
+ * insight.routes.js — AI insight routes
+ *
+ * Most routes require authentication (unlocking an insight, viewing
+ * one's own, etc.). Two public endpoints (scout-closings, featured-recent)
+ * are mounted BEFORE the `protect` middleware so the homepage and hero
+ * carousel can consume them without a logged-in user.
  */
 const express = require('express');
 const router = express.Router();
@@ -10,7 +15,13 @@ const {
   validatePagination,
 } = require('../middleware/validate.middleware');
 
-// All insight routes require authentication
+// ── Public (no auth) — real success-proof feeds for the homepage ─────────────
+// GET /api/insights/scout-closings?limit=10&perSportMin=2
+router.get('/scout-closings',  insightController.getScoutClosings);
+// GET /api/insights/featured-recent?limit=3
+router.get('/featured-recent', insightController.getFeaturedRecent);
+
+// All other insight routes require authentication
 router.use(protect);
 
 // POST /api/insights/unlock — Unlock a new insight (deducts 1 credit)

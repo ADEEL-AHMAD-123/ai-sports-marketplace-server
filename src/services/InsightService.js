@@ -44,6 +44,7 @@ const SPORT_PIPELINES = {
   nba: require('./sports/nba/NBAInsightPipeline'),
   mlb: require('./sports/mlb/MLBInsightPipeline'),
   nhl: require('./sports/nhl/NHLInsightPipeline'),
+  nfl: require('./sports/nfl/NFLInsightPipeline'),
 };
 const {
   INSIGHT_STATUS,

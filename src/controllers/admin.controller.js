@@ -202,79 +202,9 @@ const getPlatformStats = async (req, res, next) => {
 
 // ─── Player ID Health ──────────────────────────────────────────────────────────
 
-/**
- * GET /api/admin/players/health
- * Returns all cached player ID mappings with stats health status
- */
-const getPlayerHealth = async (req, res, next) => {
-  try {
-    const { sport = 'nba', limit = 100 } = req.query;
-
-    const cached = await PlayerCache.find({ sport })
-      .sort({ updatedAt: -1 })
-      .limit(parseInt(limit))
-      .lean();
-
-    // Get prop count per player to show which are active
-    const playerNames = cached.map(p => p.oddsApiName);
-    const propCounts = await PlayerProp.aggregate([
-      { $match: { playerName: { $in: playerNames.map(n => new RegExp(n, 'i')) }, isAvailable: true } },
-      { $group: { _id: { $toLower: '$playerName' }, count: { $sum: 1 } } },
-    ]);
-    const propMap = {};
-    propCounts.forEach(({ _id, count }) => { propMap[_id] = count; });
-
-    const players = cached.map(p => ({
-      oddsApiName:    p.oddsApiName,
-      // resolvedName = human-readable name returned by NBA Stats API
-      resolvedName:   p.apiSportsName?.startsWith('override:')
-                        ? null
-                        : p.apiSportsName || null,
-      // nbaStatsId = numeric ID used to query GET /players/statistics
-      nbaStatsId:     p.apiSportsId,
-      // kept as apiSportsId for DB compat — renamed in UI only
-      apiSportsId:    p.apiSportsId,
-      teamName:       p.teamName,
-      isOverride:     p.apiSportsName?.startsWith('override:') || false,
-      activePropCount: propMap[p.oddsApiName] || 0,
-      updatedAt:      p.updatedAt,
-    }));
-
-    res.status(HTTP_STATUS.OK).json({
-      success: true,
-      total: players.length,
-      players,
-    });
-  } catch (err) {
-    next(err);
-  }
-};
-
-/**
- * DELETE /api/admin/players/:name/cache
- * Clear a player's cached ID so it gets re-resolved next PropWatcher run
- */
-const clearPlayerCache = async (req, res, next) => {
-  try {
-    const { sport = 'nba' } = req.query;
-    const normalized = decodeURIComponent(req.params.name)
-      .toLowerCase().replace(/['.]/g, '').replace(/\s+/g, ' ').trim();
-
-    const result = await PlayerCache.deleteOne({ oddsApiName: normalized, sport });
-
-    logger.info('[Admin] Cleared player cache', { name: normalized, sport, deleted: result.deletedCount });
-
-    res.status(HTTP_STATUS.OK).json({
-      success: true,
-      message: result.deletedCount > 0
-        ? `Cache cleared for "${normalized}" — will re-resolve on next PropWatcher run`
-        : `No cache entry found for "${normalized}"`,
-      deleted: result.deletedCount,
-    });
-  } catch (err) {
-    next(err);
-  }
-};
+// Player ID cache health/clear endpoints removed.
+// PlayerCache model is still used by InsightOutcomeService for grading;
+// no admin UI is needed since the cache is self-healing on each grading run.
 
 // ─── User Management ──────────────────────────────────────────────────────────
 
@@ -401,11 +331,13 @@ const triggerCronJob = async (req, res, next) => {
       'prop-watcher':       ['../jobs/orchestrators/propWatcher.job',     'runPropWatcher'],
       'prop-watcher-nba':   ['../jobs/sports/nba/propWatcher',            'run'],
       'prop-watcher-mlb':   ['../jobs/sports/mlb/propWatcher',            'run'],
+      'prop-watcher-nfl':   ['../jobs/sports/nfl/propWatcher',            'run'],
       'prop-watcher-nhl':   ['../jobs/sports/nhl/propWatcher',            'run'],
       'prop-watcher-soccer':['../jobs/sports/soccer/propWatcher',         'run'],
       'post-game-sync':     ['../jobs/orchestrators/postGameSync.job',    'runPostGameSync'],
       'post-game-sync-nba': ['../jobs/sports/nba/postGameSync',           'run'],
       'post-game-sync-mlb': ['../jobs/sports/mlb/postGameSync',           'run'],
+      'post-game-sync-nfl': ['../jobs/sports/nfl/postGameSync',           'run'],
       'post-game-sync-nhl': ['../jobs/sports/nhl/postGameSync',           'run'],
       'post-game-sync-soccer': ['../jobs/sports/soccer/postGameSync',     'run'],
       'ai-log-cleanup':     ['../jobs/orchestrators/postGameSync.job',    'runAILogCleanup'],
@@ -479,27 +411,91 @@ const deleteInsight = async (req, res, next) => {
 };
 
 // ─── AI Logs ──────────────────────────────────────────────────────────────────
+// getAILogs endpoint removed. AI log retention is handled automatically by
+// the daily 3AM cron via Insight.aiLogExpiresAt TTL. Admins no longer have
+// a UI surface for raw prompt/response inspection.
 
-const getAILogs = async (req, res, next) => {
+// ─── Performance / Outcome Audit (per-game) ──────────────────────────────────
+
+const PerformanceService = require('../services/PerformanceService');
+
+/**
+ * GET /api/admin/performance/games?sport=all&days=30&page=1&limit=20
+ * Per-game accuracy report — graded insights aggregated by event with
+ * win/loss/push counts and basic game metadata.
+ */
+const getPerGameReport = async (req, res, next) => {
   try {
-    const { page = 1, limit = 10 } = req.query;
-    const skip = (parseInt(page) - 1) * parseInt(limit);
-
-    const [insights, total] = await Promise.all([
-      Insight.find({ 'aiLog.prompt': { $exists: true } })
-        .select('playerName statType bettingLine recommendation aiLog createdAt')
-        .sort({ createdAt: -1 })
-        .skip(skip)
-        .limit(parseInt(limit))
-        .lean(),
-      Insight.countDocuments({ 'aiLog.prompt': { $exists: true } }),
-    ]);
-
-    res.status(HTTP_STATUS.OK).json({
-      success: true,
-      data: insights,
-      pagination: { total, page: parseInt(page), pages: Math.ceil(total / parseInt(limit)) },
+    const data = await PerformanceService.getPerGameReport({
+      sport: req.query.sport || 'all',
+      days:  parseInt(req.query.days  || '30', 10),
+      page:  parseInt(req.query.page  || '1',  10),
+      limit: parseInt(req.query.limit || '20', 10),
     });
+    res.status(HTTP_STATUS.OK).json({ success: true, ...data });
+  } catch (err) {
+    next(err);
+  }
+};
+
+/**
+ * GET /api/admin/performance/games/:eventId
+ * Full insight roster for one game with per-insight outcome detail.
+ */
+const getGameDetail = async (req, res, next) => {
+  try {
+    const data = await PerformanceService.getGameDetail(req.params.eventId);
+    if (!data) {
+      throw new AppError('Game not found', HTTP_STATUS.NOT_FOUND);
+    }
+    res.status(HTTP_STATUS.OK).json({ success: true, ...data });
+  } catch (err) {
+    next(err);
+  }
+};
+
+/**
+ * POST /api/admin/performance/prune-exhausted
+ * Manual trigger for the lifecycle prune (deletes exhausted-retry insights
+ * older than RETRY_EXHAUSTED_PRUNE_DAYS). Daily cron also calls this.
+ */
+const pruneExhaustedRetries = async (req, res, next) => {
+  try {
+    const result = await PerformanceService.pruneExhaustedRetries({
+      days: parseInt(req.body?.days || '14', 10),
+    });
+    res.status(HTTP_STATUS.OK).json({ success: true, ...result });
+  } catch (err) {
+    next(err);
+  }
+};
+
+/**
+ * GET /api/admin/performance/archive
+ * Lifetime totals per sport (PerformanceArchive collection).
+ */
+const getArchiveSnapshot = async (req, res, next) => {
+  try {
+    const snapshot = await PerformanceService.getArchiveSnapshot();
+    res.status(HTTP_STATUS.OK).json({ success: true, archive: snapshot });
+  } catch (err) {
+    next(err);
+  }
+};
+
+/**
+ * POST /api/admin/performance/archive-graded
+ * Manual trigger for rolling-window archive: aggregates graded insights
+ * older than `days` (default 90) into PerformanceArchive, then deletes them.
+ * Same operation the daily 3AM cron runs.
+ */
+const archiveAndPruneGraded = async (req, res, next) => {
+  try {
+    const result = await PerformanceService.archiveAndPruneGraded({
+      days:   parseInt(req.body?.days || '90', 10),
+      dryRun: !!req.body?.dryRun,
+    });
+    res.status(HTTP_STATUS.OK).json({ success: true, ...result });
   } catch (err) {
     next(err);
   }
@@ -507,8 +503,6 @@ const getAILogs = async (req, res, next) => {
 
 module.exports = {
   getPlatformStats,
-  getPlayerHealth,
-  clearPlayerCache,
   listUsers,
   getUserDetail,
   adjustUserCredits,
@@ -516,5 +510,10 @@ module.exports = {
   triggerCronJob,
   listInsights,
   deleteInsight,
-  getAILogs,
+  // Performance / per-game outcome audit
+  getPerGameReport,
+  getGameDetail,
+  pruneExhaustedRetries,
+  getArchiveSnapshot,
+  archiveAndPruneGraded,
 };

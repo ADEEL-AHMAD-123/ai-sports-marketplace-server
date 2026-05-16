@@ -276,4 +276,92 @@ const listMyHistory = async (req, res, next) => {
   }
 };
 
-module.exports = { unlockInsight, getInsight, listInsights, listMyHistory };
+// ─── Public success feed (used by ScoutClosings + Hero) ──────────────────────
+
+const PerformanceService = require('../services/PerformanceService');
+
+/**
+ * GET /api/insights/scout-closings?limit=10&perSportMin=2
+ *
+ * Public — no auth. Returns the most recent successful AI insights across
+ * all sports with fair distribution (≥ perSportMin per sport when available).
+ * Replaces hardcoded marketing data with real proof.
+ */
+const getScoutClosings = async (req, res, next) => {
+  try {
+    const limit       = Math.max(1, Math.min(20, parseInt(req.query.limit       || '10', 10)));
+    const perSportMin = Math.max(0, Math.min(5,  parseInt(req.query.perSportMin || '2',  10)));
+    const sinceDays   = Math.max(7, Math.min(180, parseInt(req.query.days        || '45', 10)));
+
+    const data = await PerformanceService.getRecentSuccesses({ limit, perSportMin, sinceDays });
+
+    res.status(HTTP_STATUS.OK).json({
+      success: true,
+      data:    data.items,
+      meta: {
+        windowDays: data.windowDays,
+        total:      data.total,
+        hitRate:    data.hitRate,
+        perSport:   data.perSport,
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+/**
+ * GET /api/insights/featured-recent?limit=6
+ *
+ * Public — no auth. Used by the Hero carousel.
+ *
+ * Behaviour:
+ *  • Prefers recent WIN insights, ordered by confidence.
+ *  • Falls back to the most recent generated insights (any outcome state)
+ *    if there aren't enough winners — so the carousel always shows real
+ *    work and never the hardcoded marketing data.
+ */
+const getFeaturedRecent = async (req, res, next) => {
+  try {
+    const limit = Math.max(1, Math.min(8, parseInt(req.query.limit || '6', 10)));
+
+    // 1) Try winners first — most credible content.
+    const winnersData = await PerformanceService.getRecentSuccesses({
+      limit:       limit * 2,
+      perSportMin: 1,
+      sinceDays:   45,
+    });
+    let items = [...winnersData.items].sort((a, b) => (b.confidence || 0) - (a.confidence || 0));
+
+    // 2) Top up with recent generated insights (any outcome) if thin
+    if (items.length < limit) {
+      const recent = await PerformanceService.getRecentPublicInsights({
+        limit:       limit * 2,
+        perSportMin: 1,
+      });
+      const existing = new Set(items.map(i => i.id));
+      for (const i of recent.items) {
+        if (items.length >= limit) break;
+        if (existing.has(i.id)) continue;
+        items.push(i);
+      }
+    }
+
+    res.status(HTTP_STATUS.OK).json({
+      success: true,
+      data:    items.slice(0, limit),
+      meta:    { hitRate: winnersData.hitRate, source: items.length === winnersData.items.length ? 'wins' : 'mixed' },
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+module.exports = {
+  unlockInsight,
+  getInsight,
+  listInsights,
+  listMyHistory,
+  getScoutClosings,
+  getFeaturedRecent,
+};

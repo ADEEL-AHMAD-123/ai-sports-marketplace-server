@@ -4,7 +4,9 @@
  * Delegates to sport-specific injury services:
  *   NBA → services/sports/nba/NBAInjuryService.js  (API-Sports NBA v2)
  *   MLB → services/sports/mlb/MLBInjuryService.js  (Official MLB Stats API)
- *   NHL → services/sports/nhl/NHLInjuryService.js  (API-Sports Hockey v1)
+ *   NHL → services/sports/nhl/NHLInjuryService.js  (ESPN public injuries)
+ *   NFL → services/sports/nfl/NFLInjuryService.js  (API-Sports American Football)
+ *   Soccer → services/sports/soccer/SoccerInjuryService.js (API-Football injuries)
  *
  * All callers import this file — sport-specific details stay inside each service.
  */
@@ -12,6 +14,7 @@
 const NBAInjuryService = require('./sports/nba/NBAInjuryService');
 const MLBInjuryService = require('./sports/mlb/MLBInjuryService');
 const NHLInjuryService = require('./sports/nhl/NHLInjuryService');
+const NFLInjuryService = require('./sports/nfl/NFLInjuryService');
 const SoccerInjuryService = require('./sports/soccer/SoccerInjuryService');
 const logger           = require('../config/logger');
 
@@ -19,6 +22,7 @@ const INJURY_SERVICES = {
   nba: NBAInjuryService,
   mlb: MLBInjuryService,
   nhl: NHLInjuryService,
+  nfl: NFLInjuryService,
   soccer: SoccerInjuryService,
 };
 

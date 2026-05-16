@@ -20,9 +20,9 @@ router.get('/users/:id',                 adminController.getUserDetail);
 router.patch('/users/:id/credits',       adminController.adjustUserCredits);
 router.patch('/users/:id/status',        adminController.setUserStatus);
 
-// ── Player ID cache health
-router.get('/players/health',            adminController.getPlayerHealth);
-router.delete('/players/:name/cache',    adminController.clearPlayerCache);
+// ── Player ID cache health (REMOVED)
+// Player ID resolution now runs entirely automatically inside
+// InsightOutcomeService — no admin UI surface needed.
 
 // ── Cron job triggers
 router.post('/cron/:job',                adminController.triggerCronJob);
@@ -31,7 +31,15 @@ router.post('/cron/:job',                adminController.triggerCronJob);
 router.get('/insights',                  adminController.listInsights);
 router.delete('/insights/:id',           adminController.deleteInsight);
 
-// ── AI logs
-router.get('/logs/ai',                   adminController.getAILogs);
+// ── AI logs (REMOVED)
+// aiLog entries are now auto-pruned by the daily 3AM cleanup cron via
+// aiLogExpiresAt TTL. No admin UI surface needed.
+
+// ── Performance / per-game outcome audit
+router.get('/performance/games',                 adminController.getPerGameReport);
+router.get('/performance/games/:eventId',        adminController.getGameDetail);
+router.get('/performance/archive',               adminController.getArchiveSnapshot);
+router.post('/performance/prune-exhausted',      adminController.pruneExhaustedRetries);
+router.post('/performance/archive-graded',       adminController.archiveAndPruneGraded);
 
 module.exports = router;

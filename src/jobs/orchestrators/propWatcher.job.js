@@ -14,6 +14,7 @@ const logger = require('../../config/logger');
 const WATCHERS = {
   nba: require('../sports/nba/propWatcher'),
   mlb: require('../sports/mlb/propWatcher'),
+  nfl: require('../sports/nfl/propWatcher'),
   nhl: require('../sports/nhl/propWatcher'),
   soccer: require('../sports/soccer/propWatcher'),
 };
