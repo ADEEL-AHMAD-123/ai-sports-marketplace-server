@@ -558,8 +558,12 @@ class SoccerAdapter extends BaseAdapter {
   _trackQuota(headers) {
     const r = parseInt(headers?.['x-requests-remaining'], 10);
     if (!isNaN(r)) {
+      const prevQuota = this.oddsApiQuotaRemaining;
       this.oddsApiQuotaRemaining = r;
-      if (r <= this.QUOTA_STOP_THRESHOLD) logger.error(`🚨 [SOCCER] Odds API quota CRITICAL: ${r}`);
+      if (r <= this.QUOTA_STOP_THRESHOLD && prevQuota > this.QUOTA_STOP_THRESHOLD) {
+        // Log only once when first crossing the threshold
+        logger.error(`🚨 [SOCCER] Odds API quota CRITICAL: ${r}`);
+      }
       else if (r <= 50) logger.warn(`⚠️  [SOCCER] Odds API quota LOW: ${r}`);
     }
   }
