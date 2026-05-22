@@ -168,6 +168,12 @@ async function fetchFixturePlayers(fixtureId, fixtureDate, statsCache) {
         const playerName = p?.player?.name || '';
         if (!playerName) continue;
 
+        // API-Football's fixtures/players lists the FULL squad, including
+        // unused substitutes. A 0-minute (or null-minute) row means the
+        // player never appeared — their prop must be VOIDED, not graded as a
+        // loss against a 0-stat line.
+        const minutes = toNum(s?.games?.minutes);
+
         rows.push({
           fixtureId,
           date: fixtureDate || null,
@@ -179,7 +185,8 @@ async function fetchFixturePlayers(fixtureId, fixtureDate, statsCache) {
           goals: toNum(s?.goals?.total),
           assists: toNum(s?.goals?.assists),
           shots_on_target: toNum(s?.shots?.on),
-          minutes: toNum(s?.games?.minutes),
+          minutes,
+          didNotPlay: minutes <= 0,
         });
       }
     }

@@ -8,6 +8,7 @@
 const cron   = require('node-cron');
 const logger = require('../../config/logger');
 const Insight = require('../../models/Insight.model');
+const { Game, GAME_STATUS } = require('../../models/Game.model');
 
 const SYNCS = {
   nba: require('../sports/nba/postGameSync'),
@@ -17,17 +18,78 @@ const SYNCS = {
   soccer: require('../sports/soccer/postGameSync'),
 };
 
-const POST_GAME_SYNC_SCHEDULE = process.env.CRON_POST_GAME_SYNC_SCHEDULE || '5,20,35,50 * * * *';
+const POST_GAME_SYNC_SCHEDULE = process.env.CRON_POST_GAME_SYNC_SCHEDULE || '*/20 * * * *';
 const POST_GAME_CLEANUP_SCHEDULE = process.env.CRON_POST_GAME_CLEANUP_SCHEDULE || '0 3 * * *';
+const POST_GAME_SYNC_IDLE_MIN_INTERVAL_MINUTES = Math.max(
+  20,
+  parseInt(process.env.POST_GAME_SYNC_IDLE_MIN_INTERVAL_MINUTES || '60', 10)
+);
+const POST_GAME_ACTIVE_LOOKAHEAD_HOURS = Math.max(
+  1,
+  parseInt(process.env.POST_GAME_ACTIVE_LOOKAHEAD_HOURS || '3', 10)
+);
 let postGameSyncRunning = false;
 let postGameCleanupRunning = false;
+let lastPostGameSyncAt = null;
 
-const runPostGameSync = async (sport = null) => {
+const minutesSince = (date, now = new Date()) => {
+  if (!date) return Infinity;
+  return (now.getTime() - date.getTime()) / 60000;
+};
+
+/**
+ * Decide which sports have outstanding lifecycle work this cycle.
+ *
+ * A sport is "active" when it has at least one game in any of these states:
+ *   • LIVE       — needs the LIVE→FINAL transition and outcome grading.
+ *   • SCHEDULED with startTime ≤ lookahead — needs the SCHEDULED→LIVE
+ *     transition. There is deliberately NO lower bound on startTime: a game
+ *     whose start time has already passed must still be flipped to LIVE, and
+ *     bounding the lower edge to `now` let past-due scheduled games slip
+ *     through when the sport had nothing else active.
+ *   • FINAL      — still needs outcome re-grading and, eventually, stale
+ *     cleanup. There is deliberately NO age bound here either: grade retries
+ *     run for hours and each sport's stale-delete only fires at ~30h, so a
+ *     short recency window left FINAL games stranded in a 12–30h limbo where
+ *     they were neither re-graded nor cleaned up. Every FINAL game must be
+ *     revisited until its own postGameSync deletes it.
+ */
+const getActivePostGameSports = async (now = new Date()) => {
+  const lookahead = new Date(now.getTime() + POST_GAME_ACTIVE_LOOKAHEAD_HOURS * 3600000);
+
+  const rows = await Game.aggregate([
+    {
+      $match: {
+        $or: [
+          { status: GAME_STATUS.LIVE },
+          { status: GAME_STATUS.SCHEDULED, startTime: { $lte: lookahead } },
+          { status: GAME_STATUS.FINAL },
+        ],
+      },
+    },
+    { $group: { _id: '$sport' } },
+  ]);
+
+  return rows.map((r) => r._id).filter((s) => !!s && !!SYNCS[s]);
+};
+
+const runPostGameSync = async (sport = null, activeSportsOverride = null) => {
   logger.info('🔄 [PostGameSync] Starting lifecycle sync...');
 
-  const targets = sport
-    ? { [sport]: SYNCS[sport] }
-    : SYNCS;
+  let targets;
+  if (sport) {
+    targets = { [sport]: SYNCS[sport] };
+  } else {
+    const activeSports = Array.isArray(activeSportsOverride)
+      ? activeSportsOverride
+      : await getActivePostGameSports();
+    targets = Object.fromEntries(activeSports.map((s) => [s, SYNCS[s]]));
+  }
+
+  if (!Object.keys(targets).length) {
+    logger.info('⏭️  [PostGameSync] No active sports — skipping lifecycle sync');
+    return [];
+  }
 
   // Run all sports in PARALLEL
   const results = await Promise.allSettled(
@@ -91,10 +153,24 @@ const runPostGameSyncWithLock = async () => {
     return { skipped: true };
   }
 
+  const now = new Date();
+  const activeSports = await getActivePostGameSports(now);
+  const hasActiveSports = activeSports.length > 0;
+  const idleElapsedMin = minutesSince(lastPostGameSyncAt, now);
+  if (!hasActiveSports && idleElapsedMin < POST_GAME_SYNC_IDLE_MIN_INTERVAL_MINUTES) {
+    logger.info('⏭️  [PostGameSync] Idle throttle skip', {
+      idleElapsedMin: Math.round(idleElapsedMin),
+      idleMinInterval: POST_GAME_SYNC_IDLE_MIN_INTERVAL_MINUTES,
+    });
+    return { skipped: true, idleThrottled: true };
+  }
+
   postGameSyncRunning = true;
   const startedAt = Date.now();
   try {
-    return await runPostGameSync();
+    const result = await runPostGameSync(null, activeSports);
+    lastPostGameSyncAt = new Date();
+    return result;
   } finally {
     postGameSyncRunning = false;
     logger.debug('🔓 [PostGameSync] Lifecycle lock released', { durationMs: Date.now() - startedAt });

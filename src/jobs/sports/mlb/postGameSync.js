@@ -18,12 +18,17 @@ const { gradeEvents }            = require('../../../services/queue/OutcomeDispa
 const PlayerStatsSnapshotService = require('../../../services/PlayerStatsSnapshotService');
 const { getAdapter }             = require('../../../services/shared/adapterRegistry');
 const { cacheDel }               = require('../../../config/redis');
+const { shouldFetchScores }      = require('../shared/scorePollingPolicy');
 const logger                     = require('../../../config/logger');
 
 const SPORT = 'mlb';
 const FINALIZE_AFTER_HOURS = Number(process.env.MLB_FINALIZE_AFTER_HOURS || process.env.POST_GAME_FINALIZE_AFTER_HOURS || 3.5);
 const STALE_DELETE_AFTER_HOURS = Number(process.env.MLB_STALE_DELETE_AFTER_HOURS || process.env.POST_GAME_STALE_DELETE_AFTER_HOURS || 30);
 const OUTCOME_MAX_RETRY_ATTEMPTS = Math.max(1, parseInt(process.env.OUTCOME_MAX_RETRY_ATTEMPTS || '12', 10));
+
+// Last successful /scores call — module-level so the score-polling policy can
+// throttle across cron cycles within the process.
+let lastScoreFetchAt = null;
 
 async function run() {
   logger.info(`🔄 [MLBPostGameSync] Starting...`);
@@ -34,15 +39,8 @@ async function run() {
   const todayKey = now.toISOString().split('T')[0];
   let   changes = 0;
 
-  // Provider scoreboard truth (The Odds API scores endpoint).
+  // Provider scoreboard truth — fetched below, gated by the score policy.
   let providerFinalEventIds = new Set();
-  try {
-    const adapter = getAdapter(SPORT);
-    const finalIds = await adapter.fetchFinalEventIds?.({ daysFrom: 3 });
-    providerFinalEventIds = new Set((finalIds || []).map(String));
-  } catch (err) {
-    logger.warn(`[${SPORT.toUpperCase()}PostGameSync] Provider final check unavailable`, { error: err.message });
-  }
 
   // ── SCHEDULED → LIVE ──────────────────────────────────────────────────────
   const toLive = await Game.find({
@@ -61,6 +59,20 @@ async function run() {
     sport: SPORT,
     status: GAME_STATUS.LIVE,
   }).lean();
+
+  // Provider scores — only call /scores when a started game is plausibly
+  // finishing, throttled by the score-polling policy. When skipped, the
+  // time-based finalize below still works (providerFinalEventIds stays empty).
+  if (shouldFetchScores(liveGames, now, lastScoreFetchAt)) {
+    try {
+      const adapter = getAdapter(SPORT);
+      const finalIds = await adapter.fetchFinalEventIds?.({ daysFrom: 3 });
+      providerFinalEventIds = new Set((finalIds || []).map(String));
+      lastScoreFetchAt = now;
+    } catch (err) {
+      logger.warn(`[${SPORT.toUpperCase()}PostGameSync] Provider score check unavailable`, { error: err.message });
+    }
+  }
 
   const toFinal = liveGames.filter(g => {
     const isTimeFinal = new Date(g.startTime) <= finalizeCutoff;

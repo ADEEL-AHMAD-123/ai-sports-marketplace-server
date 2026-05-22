@@ -49,11 +49,17 @@ jest.mock('../../src/services/PlayerStatsSnapshotService', () => ({
   markSportSnapshotsStale: jest.fn().mockResolvedValue(undefined),
   getPlayerStats:          jest.fn().mockResolvedValue([]),
 }));
+// SoccerOutcomeGrader — lazily required by InsightOutcomeService for soccer
+// grading. Mocked so the DNP-void test can supply a fixture player row.
+jest.mock('../../src/services/sports/soccer/SoccerOutcomeGrader', () => ({
+  fetchStatsForInsight: jest.fn().mockResolvedValue([]),
+}));
 
 const Insight    = require('../../src/models/Insight.model');
 const { Game }   = require('../../src/models/Game.model');
 const PlayerProp = require('../../src/models/PlayerProp.model');
 const { getAdapter } = require('../../src/services/shared/adapterRegistry');
+const SoccerOutcomeGrader = require('../../src/services/sports/soccer/SoccerOutcomeGrader');
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 const makeInsight = (overrides = {}) => ({
@@ -124,6 +130,7 @@ describe('InsightOutcomeService.persistOutcomesForEvents', () => {
     PlayerProp.find.mockReturnValue({
       select: jest.fn().mockReturnValue({
         lean: jest.fn().mockResolvedValue([{
+          sport: 'nba',
           oddsEventId: 'evt_abc',
           playerName: 'LeBron James',
           statType: 'points',
@@ -174,6 +181,7 @@ describe('InsightOutcomeService.persistOutcomesForEvents', () => {
     PlayerProp.find.mockReturnValue({
       select: jest.fn().mockReturnValue({
         lean: jest.fn().mockResolvedValue([{
+          sport: 'nba',
           oddsEventId: 'evt_abc',
           playerName: 'LeBron James',
           statType: 'points',
@@ -211,6 +219,7 @@ describe('InsightOutcomeService.persistOutcomesForEvents', () => {
     PlayerProp.find.mockReturnValue({
       select: jest.fn().mockReturnValue({
         lean: jest.fn().mockResolvedValue([{
+          sport: 'nba',
           oddsEventId: 'evt_abc',
           playerName: 'LeBron James',
           statType: 'points',
@@ -248,6 +257,7 @@ describe('InsightOutcomeService.persistOutcomesForEvents', () => {
     PlayerProp.find.mockReturnValue({
       select: jest.fn().mockReturnValue({
         lean: jest.fn().mockResolvedValue([{
+          sport: 'nba',
           oddsEventId: 'evt_abc',
           playerName: 'LeBron James',
           statType: 'points',
@@ -267,6 +277,53 @@ describe('InsightOutcomeService.persistOutcomesForEvents', () => {
     expect(result.unresolved).toBe(1);
   });
 
+  it('VOIDS a soccer insight when the matched player did not play (0 minutes)', async () => {
+    const insight = makeInsight({
+      sport: 'soccer',
+      eventId: 'evt_soccer',
+      playerName: 'Unused Sub',
+      statType: 'shots_on_target',
+      bettingLine: 0.5,
+      recommendation: 'over',
+    });
+
+    Insight.find.mockReturnValue({
+      select: jest.fn().mockReturnValue({
+        lean: jest.fn().mockResolvedValue([insight]),
+      }),
+    });
+    Game.find.mockReturnValue({
+      select: jest.fn().mockReturnValue({
+        lean: jest.fn().mockResolvedValue([makeGame({ sport: 'soccer', oddsEventId: 'evt_soccer' })]),
+      }),
+    });
+    getAdapter.mockReturnValue({});
+
+    // Fixture squad row for an unused substitute: 0 minutes, all-zero stats.
+    SoccerOutcomeGrader.fetchStatsForInsight.mockResolvedValueOnce([{
+      date: '2026-01-10',
+      gameDate: '2026-01-10',
+      playerName: 'Unused Sub',
+      goals: 0,
+      assists: 0,
+      shots_on_target: 0,
+      minutes: 0,
+      didNotPlay: true,
+    }]);
+
+    Insight.bulkWrite = jest.fn().mockResolvedValue({ modifiedCount: 1 });
+
+    const result = await service.persistOutcomesForEvents(['evt_soccer']);
+
+    const updateDoc = Insight.bulkWrite.mock.calls[0][0][0].updateOne.update.$set;
+    // Must be VOID — not a loss against the 0.5 line.
+    expect(updateDoc.outcomeResult).toBe('void');
+    expect(updateDoc.outcomeActual).toBeNull();
+    expect(updateDoc.outcomeReason).toBe('player_did_not_play');
+    expect(updateDoc.outcomeNextRetryAt).toBeNull();
+    expect(result.unresolved).toBe(0);
+  });
+
   it('handles UNDER recommendation correctly — win when actual < line', async () => {
     const insight = makeInsight({ recommendation: 'under', bettingLine: 25.5 });
 
@@ -283,6 +340,7 @@ describe('InsightOutcomeService.persistOutcomesForEvents', () => {
     PlayerProp.find.mockReturnValue({
       select: jest.fn().mockReturnValue({
         lean: jest.fn().mockResolvedValue([{
+          sport: 'nba',
           oddsEventId: 'evt_abc',
           playerName: 'LeBron James',
           statType: 'points',

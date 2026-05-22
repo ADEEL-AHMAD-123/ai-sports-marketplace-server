@@ -7,7 +7,7 @@
  *  - recent team form (points for/against from recent finals)
  */
 
-const { Game, GAME_STATUS } = require('../../../models/Game.model');
+const TeamGameResult = require('../../../models/TeamGameResult.model');
 const logger = require('../../../config/logger');
 
 const RECENT_GAMES = 6;
@@ -26,47 +26,51 @@ const _safeDate = (d) => {
 async function _teamRecentForm(teamName, beforeTime) {
   if (!teamName || !beforeTime) return null;
 
-  const rows = await Game.find({
+  // Reads TeamGameResult (durable) rather than Game (deleted ~30h after
+  // kickoff) so a weekly sport like the NFL actually has history to average.
+  const rows = await TeamGameResult.find({
     sport: 'nfl',
-    status: GAME_STATUS.FINAL,
     startTime: { $lt: beforeTime },
-    $or: [{ 'homeTeam.name': teamName }, { 'awayTeam.name': teamName }],
+    $or: [{ homeTeamName: teamName }, { awayTeamName: teamName }],
   })
     .sort({ startTime: -1 })
     .limit(RECENT_GAMES)
-    .select('homeTeam.name awayTeam.name score startTime')
+    .select('homeTeamName awayTeamName homeScore awayScore startTime')
     .lean();
 
   if (!rows.length) return null;
 
   let pointsFor = 0;
   let pointsAgainst = 0;
+  let counted = 0;
 
   for (const g of rows) {
-    const homePts = _toNum(g?.score?.home);
-    const awayPts = _toNum(g?.score?.away);
+    const homePts = _toNum(g?.homeScore);
+    const awayPts = _toNum(g?.awayScore);
     if (homePts == null || awayPts == null) continue;
 
-    const isHome = g?.homeTeam?.name === teamName;
+    const isHome = g.homeTeamName === teamName;
     pointsFor += isHome ? homePts : awayPts;
     pointsAgainst += isHome ? awayPts : homePts;
+    counted += 1;
   }
 
-  const count = rows.length;
+  // Average only over rows with valid scores — never divide by skipped rows.
+  if (!counted) return null;
   return {
-    games: count,
-    pointsForPerGame: count ? Number((pointsFor / count).toFixed(1)) : null,
-    pointsAgainstPerGame: count ? Number((pointsAgainst / count).toFixed(1)) : null,
+    games: counted,
+    pointsForPerGame: Number((pointsFor / counted).toFixed(1)),
+    pointsAgainstPerGame: Number((pointsAgainst / counted).toFixed(1)),
   };
 }
 
 async function _teamRestDays(teamName, beforeTime) {
   if (!teamName || !beforeTime) return null;
 
-  const prev = await Game.findOne({
+  const prev = await TeamGameResult.findOne({
     sport: 'nfl',
     startTime: { $lt: beforeTime },
-    $or: [{ 'homeTeam.name': teamName }, { 'awayTeam.name': teamName }],
+    $or: [{ homeTeamName: teamName }, { awayTeamName: teamName }],
   })
     .sort({ startTime: -1 })
     .select('startTime')
@@ -118,18 +122,26 @@ async function getInsightContext(prop, game) {
         ? (homeRestDays - awayRestDays).toFixed(1)
         : null;
 
+    // Omit teamContext entirely when there is no real history yet (e.g. a new
+    // setup before TeamGameResult has accumulated games) — the prompt builder
+    // then skips the matchup block instead of emitting a misleading "n/a" wall.
+    const hasTeamData =
+      !!homeForm || !!awayForm || homeRestDays != null || awayRestDays != null;
+
     return {
       gameContext: _buildGameContext(game),
-      teamContext: {
-        homeTeamName: homeName,
-        awayTeamName: awayName,
-        homeForm,
-        awayForm,
-        homeRestDays,
-        awayRestDays,
-        restEdgeDays: restEdge != null ? Number(restEdge) : null,
-        hasShortRest: (homeRestDays != null && homeRestDays < 6) || (awayRestDays != null && awayRestDays < 6),
-      },
+      teamContext: hasTeamData
+        ? {
+            homeTeamName: homeName,
+            awayTeamName: awayName,
+            homeForm,
+            awayForm,
+            homeRestDays,
+            awayRestDays,
+            restEdgeDays: restEdge != null ? Number(restEdge) : null,
+            hasShortRest: (homeRestDays != null && homeRestDays < 6) || (awayRestDays != null && awayRestDays < 6),
+          }
+        : null,
     };
   } catch (err) {
     logger.warn('[NFLInsightPipeline] context failed (non-fatal)', { error: err.message });

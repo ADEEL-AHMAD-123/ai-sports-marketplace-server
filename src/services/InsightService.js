@@ -34,7 +34,7 @@ const Transaction  = require('../models/Transaction.model');
 const User         = require('../models/User.model');
 const PlayerProp   = require('../models/PlayerProp.model');
 const { Game }     = require('../models/Game.model');
-const { cacheDel } = require('../config/redis');
+const { cacheGet, cacheSet, cacheDel } = require('../config/redis');
 const StrategyService = require('./StrategyService');
 const PlayerStatsSnapshotService = require('./PlayerStatsSnapshotService');
 const { getAdapter } = require('./shared/adapterRegistry');
@@ -55,6 +55,9 @@ const {
   TRANSACTION_TYPES,
 } = require('../config/constants');
 const logger = require('../config/logger');
+
+const PREFLIGHT_PROP_FRESH_SECONDS = parseInt(process.env.PREFLIGHT_PROP_FRESH_SECONDS || '300', 10);
+const PREFLIGHT_LINE_CACHE_TTL_SECONDS = parseInt(process.env.PREFLIGHT_LINE_CACHE_TTL_SECONDS || '120', 10);
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
@@ -389,7 +392,7 @@ class InsightService {
       dataQuality: (() => {
         const q = parsed.dataQuality || 'moderate';
         const baseline = processedStats?.baselineGamesCount ?? 30;
-        const absEd = Math.abs(scores?.edgePercentage ?? 0);
+        const absEd = Math.abs(edgePercentage ?? 0);
         if (q === 'strong' && baseline < 30) return 'moderate';
         if (q === 'strong' && absEd > 80 && baseline < 20) return 'moderate';
         return q;
@@ -727,11 +730,60 @@ class InsightService {
     try {
       const adapter = getAdapter(sport);
 
+      // Per-stat-type thresholds — tight lines (K props, threes) block on 0.5+ moves.
+      const statThresholds = {
+        pitcher_strikeouts: 0.5,
+        threes:             0.5,
+        goals:              1.0,
+        assists:            1.0,
+        shots_on_target:    1.0,
+      };
+      const effectiveThreshold = statThresholds[statType] ?? ODDS_CHANGE_THRESHOLD;
+
+      const prop = await PlayerProp.findOne({
+        sport,
+        oddsEventId: eventId,
+        playerName,
+        statType,
+      }).select('line isAvailable lastUpdatedAt').lean();
+
+      if (prop?.isAvailable === false) {
+        return { passed: false, reason: 'This prop is no longer available.', currentLine: null };
+      }
+
+      // If watcher data is fresh, trust DB line and skip expensive live API call.
+      if (prop?.line != null && prop?.lastUpdatedAt) {
+        const ageSec = (Date.now() - new Date(prop.lastUpdatedAt).getTime()) / 1000;
+        if (ageSec <= PREFLIGHT_PROP_FRESH_SECONDS) {
+          const lineChange = Math.abs(prop.line - bettingLine);
+          if (lineChange > effectiveThreshold) {
+            return {
+              passed: false,
+              reason: `Odds have changed (was ${bettingLine}, now ${prop.line})`,
+              currentLine: prop.line,
+            };
+          }
+          return { passed: true, currentLine: prop.line };
+        }
+      }
+
       if (adapter.oddsApiQuotaRemaining === 0) {
         return { passed: false, reason: 'Live odds temporarily unavailable.', currentLine: null };
       }
 
-      const { line: currentLine, isAvailable } = await adapter.fetchCurrentLine(eventId, playerName, statType);
+      const playerKey = String(playerName || '').toLowerCase().replace(/\s+/g, ' ').trim();
+      const cacheKey = `preflight:line:${sport}:${eventId}:${statType}:${playerKey}`;
+
+      let cached = await cacheGet(cacheKey);
+      if (cached && typeof cached !== 'object') cached = null;
+
+      const lineData = cached || await adapter.fetchCurrentLine(eventId, playerName, statType);
+
+      if (!cached && lineData) {
+        await cacheSet(cacheKey, lineData, PREFLIGHT_LINE_CACHE_TTL_SECONDS);
+      }
+
+      const { line: currentLine, isAvailable } = lineData || { line: null, isAvailable: false };
 
       if (!isAvailable || currentLine === null) {
         await PlayerProp.updateOne(
@@ -747,16 +799,6 @@ class InsightService {
         return { passed: false, reason: 'This prop is no longer available.', currentLine: null };
       }
 
-      // Per-stat-type thresholds — tight lines (K props, goals) block on 0.5+ moves
-      // Soccer uses 1.0 since lower-liquidity markets have higher volatility
-      const statThresholds = {
-        pitcher_strikeouts: 0.5,
-        threes:             0.5,
-        goals:              1.0,  // Soccer goals: increased from 0.5 to 1.0 for volatile markets
-        assists:            1.0,  // Soccer assists: use global threshold
-        shots_on_target:    1.0,  // Soccer shots: use global threshold
-      };
-      const effectiveThreshold = statThresholds[statType] ?? ODDS_CHANGE_THRESHOLD;
       const lineChange = Math.abs(currentLine - bettingLine);
       if (lineChange > effectiveThreshold) {
         return { passed: false, reason: `Odds have changed (was ${bettingLine}, now ${currentLine})`, currentLine };

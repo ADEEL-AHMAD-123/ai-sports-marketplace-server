@@ -10,6 +10,7 @@ const { getAdapter } = require('../../../services/shared/adapterRegistry');
 const SoccerInjuryService = require('../../../services/sports/soccer/SoccerInjuryService');
 const { cacheDel } = require('../../../config/redis');
 const { ODDS_CHANGE_THRESHOLD, INSIGHT_STATUS } = require('../../../config/constants');
+const { shouldFetchPropsForGame, getPropFetchWindow } = require('../shared/propPollingPolicy');
 const logger = require('../../../config/logger');
 
 const SPORT = 'soccer';
@@ -27,10 +28,11 @@ async function run() {
   const adapter = getAdapter(SPORT);
 
   const now = new Date();
+  const { start, end } = getPropFetchWindow(now);
   const games = await Game.find({
     sport: SPORT,
     oddsEventId: { $exists: true, $ne: null },
-    startTime: { $gte: new Date(now.getTime() - 3 * 3600000), $lte: new Date(now.getTime() + 72 * 3600000) },
+    startTime: { $gte: start, $lte: end },
     status: { $in: [GAME_STATUS.SCHEDULED, GAME_STATUS.LIVE] },
   }).lean();
 
@@ -44,6 +46,10 @@ async function run() {
 
   const results = await _mapGamesWithConcurrency(games, async (game) => {
     try {
+      if (!shouldFetchPropsForGame(game, now)) {
+        return { upserted: 0, touchedEventId: null };
+      }
+
       const [rawProps, injuryMap] = await Promise.all([
         adapter.fetchProps(game.oddsEventId, { oddsSportKey: game.oddsSportKey }),
         SoccerInjuryService.getInjuryMap({

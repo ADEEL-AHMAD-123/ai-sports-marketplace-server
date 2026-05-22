@@ -18,6 +18,7 @@ const { cacheDel }           = require('../../../config/redis');
 const logger                 = require('../../../config/logger');
 const NHLInjuryService       = require('../../../services/sports/nhl/NHLInjuryService');
 const NHLStatsClient         = require('../../../services/sports/nhl/NHLStatsClient');
+const { shouldFetchPropsForGame, getPropFetchWindow } = require('../shared/propPollingPolicy');
 
 const SPORT = 'nhl';
 
@@ -41,9 +42,10 @@ async function run() {
   const adapter = getAdapter(SPORT);
 
   const now = new Date();
+  const { start, end } = getPropFetchWindow(now);
   const games = await Game.find({
     sport:     SPORT,
-    startTime: { $gte: new Date(now.getTime() - 3*3600000), $lte: new Date(now.getTime() + 72*3600000) },
+    startTime: { $gte: start, $lte: end },
     status:    { $in: [GAME_STATUS.SCHEDULED, GAME_STATUS.LIVE] },
   }).lean();
 
@@ -53,6 +55,8 @@ async function run() {
   let totalScratched = 0;
 
   for (const game of games) {
+    if (!shouldFetchPropsForGame(game, now)) continue;
+
     const rawProps = await adapter.fetchProps(game.oddsEventId);
     if (!rawProps.length) continue;
 

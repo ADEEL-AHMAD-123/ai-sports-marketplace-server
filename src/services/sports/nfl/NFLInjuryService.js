@@ -13,6 +13,7 @@
 
 const ApiSportsClient = require('../../shared/ApiSportsClient');
 const { cacheGet, cacheSet } = require('../../../config/redis');
+const { nflSeasonYear } = require('./nflSeason');
 const logger = require('../../../config/logger');
 
 const CACHE_TTL = 30 * 60; // 30 min
@@ -39,11 +40,6 @@ const client = () => {
 
 const normKey = (name = '') =>
   String(name).toLowerCase().replace(/[.'\-]/g, ' ').replace(/\s+/g, ' ').trim();
-
-const _currentSeason = () => {
-  const now = new Date();
-  return now.getFullYear();
-};
 
 const _pick = (obj, paths = []) => {
   for (const path of paths) {
@@ -85,7 +81,10 @@ async function _fetchLeagueInjuries(season) {
  * @returns {Promise<Map<string, {status,severity,reason}>>}
  */
 async function getInjuryMap(gameCtx = {}) {
-  const season = _currentSeason();
+  // Resolve the season from the game's kickoff when available — a January
+  // playoff game belongs to the previous calendar year's season. Falls back
+  // to "now" when no startTime is supplied.
+  const season = nflSeasonYear(gameCtx.startTime);
   const cacheKey = `injury:nfl:game:${gameCtx.oddsEventId || normKey([gameCtx.homeTeamName, gameCtx.awayTeamName].join('_'))}`;
   const cached = await cacheGet(cacheKey);
   if (cached) return new Map(Object.entries(cached));

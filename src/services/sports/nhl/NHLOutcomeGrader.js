@@ -18,7 +18,9 @@ const logger         = require('../../../config/logger');
 const NHL_STAT_MAP = {
   goals:         row => num(row.goals),
   assists:       row => num(row.assists),
-  shots_on_goal: row => num(row.shots) || num(row.shotsOnGoal) || num(row.sog),
+  // Try each shot-count field in order; `firstNum` (not `||`) so a legitimate
+  // 0-shot game returns 0 instead of falling through to a null result.
+  shots_on_goal: row => firstNum(row.shots, row.shotsOnGoal, row.sog),
   points:        row => {
     const g = num(row.goals);
     const a = num(row.assists);
@@ -29,6 +31,15 @@ const NHL_STAT_MAP = {
 function num(v) {
   const x = Number(v);
   return Number.isFinite(x) ? x : null;
+}
+
+// First finite numeric value among the candidates — 0 is a valid result.
+function firstNum(...values) {
+  for (const v of values) {
+    const n = num(v);
+    if (n !== null) return n;
+  }
+  return null;
 }
 
 function extractStat(row, statType) {

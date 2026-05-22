@@ -220,6 +220,11 @@ class InsightOutcomeService {
       const exhausted = nextAttempts >= OUTCOME_MAX_RETRY_ATTEMPTS;
 
       const unresolvedReason = exhausted ? 'retry_exhausted' : (row.reason || 'unresolved');
+      // win/loss/push carry no reason. A void keeps its reason so the record
+      // explains WHY it was voided (e.g. player_did_not_play).
+      const outcomeReason = row.result === 'void'
+        ? (row.reason || 'void')
+        : (resolved ? null : unresolvedReason);
 
       return {
         updateOne: {
@@ -230,7 +235,7 @@ class InsightOutcomeService {
               outcomeActual:     Number.isFinite(row.actual) ? row.actual : null,
               outcomeGameStatus: row.gameStatus || null,
               outcomeGradedAt:   gradedAt,
-              outcomeReason:     resolved ? null : unresolvedReason,
+              outcomeReason,
               outcomeNextRetryAt: resolved || exhausted
                 ? null
                 : _computeNextRetryAt(nextAttempts, row.reason),
@@ -442,6 +447,26 @@ class InsightOutcomeService {
           bestDiff = diff;
           bestRow  = row;
         }
+      }
+
+      // A matched row explicitly flagged as "did not play" (e.g. an unused
+      // soccer substitute carried in the fixture squad list) must be VOIDED:
+      // the player had no opportunity to reach the line, so grading their
+      // 0-stat row as a loss would be incorrect.
+      if (bestRow?.didNotPlay) {
+        rows.push({
+          ...insight,
+          gameStatus: game.status,
+          result: 'void',
+          actual: null,
+          reason: 'player_did_not_play',
+          sourceProvider: statsPayload.sourceProvider || `${insight.sport || 'unknown'}-adapter`,
+          sourceGameId: bestRow?.gameId ? String(bestRow.gameId) : null,
+          sourceGameDate: parseDateFromRow(bestRow || {}) || null,
+          sourceDateDiffHours: Number.isFinite(bestDiff) ? Number((bestDiff / 3600000).toFixed(3)) : null,
+          sourceStatsRowsChecked: stats.length,
+        });
+        continue;
       }
 
       const actual = bestRow ? extractStat(bestRow, insight.statType, insight.sport) : null;

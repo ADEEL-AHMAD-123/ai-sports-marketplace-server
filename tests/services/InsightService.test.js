@@ -18,6 +18,11 @@ jest.mock('../../src/models/Insight.model');
 jest.mock('../../src/models/User.model');
 jest.mock('../../src/models/Transaction.model');
 jest.mock('../../src/models/PlayerProp.model');
+jest.mock('../../src/config/redis', () => ({
+  cacheGet: jest.fn().mockResolvedValue(null),
+  cacheSet: jest.fn().mockResolvedValue(true),
+  cacheDel: jest.fn().mockResolvedValue(0),
+}));
 jest.mock('../../src/models/Game.model', () => ({
   Game: {
     findOne: jest.fn(),
@@ -97,21 +102,32 @@ const mockOpenAIResponse = {
 
 describe('InsightService', () => {
 
+  const makeQuery = (value) => ({
+    select: jest.fn().mockReturnThis(),
+    lean: jest.fn().mockResolvedValue(value),
+  });
+
   beforeEach(() => {
     jest.clearAllMocks();
     mockOpenAICreate = jest.fn();
     getAdapter.mockReturnValue(mockAdapter);
     mockUser.hasUnlockedInsight.mockReturnValue(false);
     mockUser.hasEnoughCredits.mockReturnValue(true);
-    Game.findOne.mockReturnValue({
-      lean: jest.fn().mockResolvedValue({
-        homeTeam: { name: 'Los Angeles Lakers' },
-        awayTeam: { name: 'Golden State Warriors' },
-      }),
-    });
-    PlayerProp.findOne.mockReturnValue({
-      lean: jest.fn().mockResolvedValue({ apiSportsPlayerId: 2544 }),
-    });
+    Game.findOne.mockImplementation(() => makeQuery({
+      homeTeam: { name: 'Los Angeles Lakers' },
+      awayTeam: { name: 'Golden State Warriors' },
+      startTime: new Date('2026-01-10T20:00:00Z'),
+    }));
+    PlayerProp.findOne.mockImplementation(() => makeQuery({
+      apiSportsPlayerId: 2544,
+      line: null,
+      isAvailable: true,
+      lastUpdatedAt: null,
+      homeTeamName: 'Los Angeles Lakers',
+      awayTeamName: 'Golden State Warriors',
+      playerTeam: 'home',
+    }));
+    PlayerProp.updateOne = jest.fn().mockResolvedValue({ modifiedCount: 1 });
     getPlayerInjuryStatus.mockResolvedValue(null);
     getInjuryPromptContext.mockResolvedValue('');
   });

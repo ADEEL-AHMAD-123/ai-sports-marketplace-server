@@ -11,6 +11,7 @@ const { bulkResolvePlayerIds } = require('../../../utils/playerResolver');
 const NFLInjuryService = require('../../../services/sports/nfl/NFLInjuryService');
 const { cacheDel } = require('../../../config/redis');
 const { ODDS_CHANGE_THRESHOLD, INSIGHT_STATUS } = require('../../../config/constants');
+const { shouldFetchPropsForGame, getPropFetchWindow } = require('../shared/propPollingPolicy');
 const logger = require('../../../config/logger');
 
 const SPORT = 'nfl';
@@ -21,10 +22,11 @@ async function run() {
   const adapter = getAdapter(SPORT);
 
   const now = new Date();
+  const { start, end } = getPropFetchWindow(now);
   const games = await Game.find({
     sport: SPORT,
     oddsEventId: { $exists: true, $ne: null },
-    startTime: { $gte: new Date(now.getTime() - 3 * 3600000), $lte: new Date(now.getTime() + 72 * 3600000) },
+    startTime: { $gte: start, $lte: end },
     status: { $in: [GAME_STATUS.SCHEDULED, GAME_STATUS.LIVE] },
   }).lean();
 
@@ -36,6 +38,8 @@ async function run() {
   let totalUpserted = 0;
 
   for (const game of games) {
+    if (!shouldFetchPropsForGame(game, now)) continue;
+
     const rawProps = await adapter.fetchProps(game.oddsEventId);
 
     const uniqueNames = [...new Set(rawProps.map((p) => p.playerName))];
@@ -52,6 +56,7 @@ async function run() {
       homeTeamName: game.homeTeam?.name,
       awayTeamName: game.awayTeam?.name,
       oddsEventId: game.oddsEventId,
+      startTime: game.startTime,
     }).catch(() => new Map());
 
     if (!rawProps.length) {

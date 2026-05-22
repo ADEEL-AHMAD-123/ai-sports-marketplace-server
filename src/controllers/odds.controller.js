@@ -17,7 +17,7 @@
 const { Game, GAME_STATUS }  = require('../models/Game.model');
 const PlayerProp             = require('../models/PlayerProp.model');
 const Insight                = require('../models/Insight.model');
-const { cacheGet, cacheSet, cacheDel } = require('../config/redis');
+const { cacheGet, cacheSet, cacheDel, cacheExists } = require('../config/redis');
 const {
   SPORTS, SPORT_LABELS, ACTIVE_SPORTS,
   CACHE_TTL, CACHE_KEYS, HTTP_STATUS, INSIGHT_STATUS,
@@ -25,6 +25,8 @@ const {
 const { AppError }           = require('../middleware/errorHandler.middleware');
 const logger                 = require('../config/logger');
 const { getTeamLogoUrl, getApiSportsLogoUrl } = require('../services/shared/teamMaps');
+
+const REFRESH_COOLDOWN_SECONDS = parseInt(process.env.ODDS_REFRESH_COOLDOWN_SECONDS || '45', 10);
 
 // ─── Sports list ───────────────────────────────────────────────────────────────
 
@@ -368,8 +370,19 @@ const _onlyGamesWithProps = (games) => {
 // Used when user hits "Odds moved too fast" error and clicks refresh.
 
 const refreshProps = async (req, res, next) => {
+  const { sport, eventId } = req.params;
+  const refreshCooldownKey = `odds:refresh-lock:${sport}:${eventId}`;
+  // Tracks whether THIS request actually placed the cooldown lock, so the
+  // catch block only releases a lock it owns.
+  let cooldownLocked = false;
+
   try {
-    const { sport, eventId } = req.params;
+    if (await cacheExists(refreshCooldownKey)) {
+      return res.status(HTTP_STATUS.TOO_MANY_REQUESTS).json({
+        success: false,
+        message: `Refresh is cooling down. Try again in ~${REFRESH_COOLDOWN_SECONDS}s.`,
+      });
+    }
 
     // Get game to fetch fresh props
     const game = await Game.findOne({ sport, oddsEventId: eventId })
@@ -377,6 +390,7 @@ const refreshProps = async (req, res, next) => {
       .lean();
 
     if (!game) {
+      // No API call was made — don't burn a 45s cooldown on a 404.
       return res.status(HTTP_STATUS.NOT_FOUND).json({
         success: false,
         message: 'Game not found.',
@@ -388,6 +402,11 @@ const refreshProps = async (req, res, next) => {
     const adapter = getAdapter(sport);
 
     logger.info(`[OddsController] Refreshing props from bookies for ${sport}:${eventId}`);
+
+    // Place the cooldown only now — once we're committed to spending an API
+    // call. A failed fetch releases it (catch block) so the user can retry.
+    await cacheSet(refreshCooldownKey, { locked: true }, REFRESH_COOLDOWN_SECONDS);
+    cooldownLocked = true;
 
     const rawProps = await adapter.fetchProps(eventId, { oddsSportKey: game.oddsSportKey });
 
@@ -466,6 +485,11 @@ const refreshProps = async (req, res, next) => {
     });
   } catch (err) {
     logger.error('[OddsController] Refresh props error', { error: err.message });
+    // Release the cooldown so a failed refresh doesn't lock the user out for
+    // 45s. Best-effort — never let cleanup mask the original error.
+    if (cooldownLocked) {
+      await cacheDel(refreshCooldownKey).catch(() => {});
+    }
     next(err);
   }
 };

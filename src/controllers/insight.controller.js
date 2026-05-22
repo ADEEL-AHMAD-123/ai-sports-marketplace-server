@@ -322,33 +322,60 @@ const listInsights = async (req, res, next) => {
 // ─── List current user's unlocked insight history ───────────────────────────
 
 /**
- * GET /api/insights/my-history?filter=highConfidence&page=1&limit=20
+ * GET /api/insights/my-history
+ *   ?filter=highConfidence|bestValue|won|lost|pushed|pending
+ *   &sport=nba|mlb|nhl|nfl|soccer
+ *   &page=1&limit=20
+ *   &stats=1                 — include a lifetime stats summary
  *
  * Returns only insights unlocked by the current user.
+ *
+ * Filters split into two families:
+ *   • Tag filters (highConfidence, bestValue) — boolean flags
+ *   • Outcome filters (won, lost, pushed, pending) — graded result
+ *
+ * When ?stats=1 is passed, the response also includes a `stats` block
+ * computed across the user's ENTIRE unlocked set (ignoring page/filter)
+ * so the UI can show lifetime KPIs and accurate per-filter counts.
  */
+const OUTCOME_FILTERS = {
+  won:     { outcomeResult: 'win' },
+  lost:    { outcomeResult: 'loss' },
+  pushed:  { outcomeResult: 'push' },
+  // "Pending" = not yet graded. `void` is a final state (game canceled, etc.)
+  // so it should NOT be considered pending.
+  pending: { outcomeResult: { $in: [null, 'unresolved'] } },
+};
+
 const listMyHistory = async (req, res, next) => {
   try {
     const {
       filter,
-      page = 1,
+      sport,
+      page  = 1,
       limit = 20,
+      stats,
     } = req.query;
 
     const unlockedIds = req.user.unlockedInsights || [];
 
-    const query = {
-      _id: { $in: unlockedIds },
+    const baseQuery = {
+      _id:    { $in: unlockedIds },
       status: INSIGHT_STATUS.GENERATED,
     };
+    if (sport) baseQuery.sport = sport;
 
+    // Build the filtered query for the paged list
+    const query = { ...baseQuery };
     if (filter === 'highConfidence') query.isHighConfidence = true;
-    if (filter === 'bestValue') query.isBestValue = true;
+    else if (filter === 'bestValue') query.isBestValue = true;
+    else if (OUTCOME_FILTERS[filter]) Object.assign(query, OUTCOME_FILTERS[filter]);
 
-    const pageNum = parseInt(page, 10);
+    const pageNum  = parseInt(page,  10);
     const limitNum = parseInt(limit, 10);
-    const skip = (pageNum - 1) * limitNum;
+    const skip     = (pageNum - 1) * limitNum;
 
-    const [insights, total] = await Promise.all([
+    const tasks = [
       Insight.find(query)
         .select('-aiLog')
         .sort({ createdAt: -1 })
@@ -356,18 +383,71 @@ const listMyHistory = async (req, res, next) => {
         .limit(limitNum)
         .lean(),
       Insight.countDocuments(query),
-    ]);
+    ];
 
-    res.status(HTTP_STATUS.OK).json({
+    // Lifetime stats aggregation — opt-in to avoid extra work on every poll
+    const wantStats = stats === '1' || stats === 'true';
+    if (wantStats) {
+      tasks.push(
+        Insight.aggregate([
+          { $match: baseQuery },
+          {
+            $group: {
+              _id: null,
+              total:          { $sum: 1 },
+              won:            { $sum: { $cond: [{ $eq: ['$outcomeResult', 'win']  }, 1, 0] } },
+              lost:           { $sum: { $cond: [{ $eq: ['$outcomeResult', 'loss'] }, 1, 0] } },
+              pushed:         { $sum: { $cond: [{ $eq: ['$outcomeResult', 'push'] }, 1, 0] } },
+              voided:         { $sum: { $cond: [{ $eq: ['$outcomeResult', 'void'] }, 1, 0] } },
+              pending: {
+                $sum: {
+                  $cond: [
+                    { $in: ['$outcomeResult', [null, 'unresolved']] },
+                    1,
+                    0,
+                  ],
+                },
+              },
+              highConfidence: { $sum: { $cond: ['$isHighConfidence', 1, 0] } },
+              bestValue:      { $sum: { $cond: ['$isBestValue',      1, 0] } },
+            },
+          },
+        ]),
+      );
+    }
+
+    const [insights, total, statsAgg] = await Promise.all(tasks);
+
+    const payload = {
       success: true,
-      data: insights,
+      data:    insights,
       pagination: {
         total,
-        page: pageNum,
-        pages: Math.ceil(total / limitNum),
+        page:  pageNum,
+        pages: Math.ceil(total / limitNum) || 0,
         limit: limitNum,
       },
-    });
+    };
+
+    if (wantStats) {
+      const s = statsAgg?.[0] || {};
+      const won  = s.won  || 0;
+      const lost = s.lost || 0;
+      const decisive = won + lost;
+      payload.stats = {
+        total:          s.total          || 0,
+        won,
+        lost,
+        pushed:         s.pushed         || 0,
+        voided:         s.voided         || 0,
+        pending:        s.pending        || 0,
+        highConfidence: s.highConfidence || 0,
+        bestValue:      s.bestValue      || 0,
+        hitRate: decisive ? Math.round((won * 100) / decisive) : null,
+      };
+    }
+
+    res.status(HTTP_STATUS.OK).json(payload);
   } catch (err) {
     next(err);
   }

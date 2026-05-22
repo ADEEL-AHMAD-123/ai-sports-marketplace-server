@@ -110,6 +110,6 @@ describe('injuryService MLB support', () => {
 
   it('marks mlb as supported injury sport', () => {
     expect(isInjurySportSupported('mlb')).toBe(true);
-    expect(isInjurySportSupported('nfl')).toBe(false);
+    expect(isInjurySportSupported('nfl')).toBe(true);
   });
 });

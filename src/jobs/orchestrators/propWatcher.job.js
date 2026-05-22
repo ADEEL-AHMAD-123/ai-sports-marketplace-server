@@ -19,7 +19,9 @@ const WATCHERS = {
   soccer: require('../sports/soccer/propWatcher'),
 };
 
-const PROP_WATCHER_SCHEDULE = process.env.CRON_PROP_WATCHER_SCHEDULE || '2,32 * * * *';
+// Run frequently so policy windows (e.g. every 20m near start) can be honored.
+// Actual API usage is still gated per game by shouldFetchPropsForGame().
+const PROP_WATCHER_SCHEDULE = process.env.CRON_PROP_WATCHER_SCHEDULE || '*/10 * * * *';
 let propWatcherRunning = false;
 
 const runPropWatcher = async (sport = null) => {

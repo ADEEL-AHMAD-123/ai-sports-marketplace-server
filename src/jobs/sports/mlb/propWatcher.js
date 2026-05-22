@@ -14,6 +14,7 @@ const { enrichBatterPropsWithStarter } = require('../../../services/sports/mlb/M
 const MLBInjuryService        = require('../../../services/sports/mlb/MLBInjuryService');
 const { cacheDel }            = require('../../../config/redis');
 const { ODDS_CHANGE_THRESHOLD, INSIGHT_STATUS } = require('../../../config/constants');
+const { shouldFetchPropsForGame, getPropFetchWindow } = require('../shared/propPollingPolicy');
 const logger                  = require('../../../config/logger');
 
 const SPORT = 'mlb';
@@ -25,9 +26,10 @@ async function run() {
   const adapter = getAdapter(SPORT);
 
   const now = new Date();
+  const { start, end } = getPropFetchWindow(now);
   const games = await Game.find({
     sport:     SPORT,
-    startTime: { $gte: new Date(now.getTime() - 3*3600000), $lte: new Date(now.getTime() + 72*3600000) },
+    startTime: { $gte: start, $lte: end },
     status:    { $in: [GAME_STATUS.SCHEDULED, GAME_STATUS.LIVE] },
   }).lean();
 
@@ -36,6 +38,8 @@ async function run() {
   let totalUpserted = 0;
 
   for (const game of games) {
+    if (!shouldFetchPropsForGame(game, now)) continue;
+
     const rawProps = await adapter.fetchProps(game.oddsEventId);
     if (!rawProps.length) continue;
 

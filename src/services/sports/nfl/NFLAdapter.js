@@ -11,6 +11,7 @@ const axios = require('axios');
 const logger = require('../../../config/logger');
 const ApiSportsClient = require('../../shared/ApiSportsClient');
 const { applyNFLFormulas, buildNFLPrompt } = require('./NFLFormulas');
+const { nflSeasonYear } = require('./nflSeason');
 const { getTeamId, getTeamAbbr, getTeamLogoUrl, getApiSportsLogoUrl } = require('../../shared/teamMaps');
 
 const NFL_MARKET_MAP = {
@@ -55,6 +56,20 @@ class NFLAdapter extends BaseAdapter {
   }
 
   async fetchFinalEventIds({ daysFrom = 3 } = {}) {
+    const scored = await this.fetchFinalScores({ daysFrom });
+    return scored.filter((g) => g.completed).map((g) => g.eventId);
+  }
+
+  /**
+   * Fetch recent games WITH scores from The Odds API /scores endpoint.
+   *
+   * Returns one entry per event:
+   *   { eventId, completed, homeTeam, awayTeam, homeScore, awayScore }
+   *
+   * Scores are null until the provider posts them. Used by postGameSync to
+   * both detect finalized games and persist results into TeamGameResult.
+   */
+  async fetchFinalScores({ daysFrom = 3 } = {}) {
     try {
       const response = await axios.get(
         `${this.oddsApiBase}/sports/${this.oddsSportKey}/scores`,
@@ -65,11 +80,30 @@ class NFLAdapter extends BaseAdapter {
       );
       this._trackQuota(response.headers);
       const games = Array.isArray(response.data) ? response.data : [];
+
       return games
-        .filter((g) => g?.completed === true && g?.id)
-        .map((g) => String(g.id));
+        .filter((g) => g?.id)
+        .map((g) => {
+          // /scores returns `scores: [{ name, score }]` (score is a string),
+          // or null before the game has a posted score.
+          const scoreRows = Array.isArray(g.scores) ? g.scores : [];
+          const scoreFor = (teamName) => {
+            if (!teamName) return null;
+            const row = scoreRows.find((s) => s?.name === teamName);
+            const n = row ? Number(row.score) : NaN;
+            return Number.isFinite(n) ? n : null;
+          };
+          return {
+            eventId:   String(g.id),
+            completed: g.completed === true,
+            homeTeam:  g.home_team || null,
+            awayTeam:  g.away_team || null,
+            homeScore: scoreFor(g.home_team),
+            awayScore: scoreFor(g.away_team),
+          };
+        });
     } catch (err) {
-      logger.warn('⚠️ [NFL] fetchFinalEventIds failed', { error: err.message });
+      logger.warn('⚠️ [NFL] fetchFinalScores failed', { error: err.message });
       return [];
     }
   }
@@ -130,7 +164,10 @@ class NFLAdapter extends BaseAdapter {
   async fetchPlayerStats({ playerId, season }) {
     if (!playerId) return [];
 
-    const yr = season || new Date().getFullYear();
+    // NFL seasons are start-year based — using the raw calendar year would
+    // request a not-yet-started season for every Jan–Jul game and burn an
+    // API call on the empty result before the yr-1 fallback corrects it.
+    const yr = season || nflSeasonYear();
 
     try {
       const { cacheGet, cacheSet } = require('../../../config/redis');
@@ -140,6 +177,8 @@ class NFLAdapter extends BaseAdapter {
 
       let stats = await this.statsClient.get('players/statistics', { id: playerId, season: yr });
       if (!stats?.length) {
+        // Early-season fallback: a player with no games in the current
+        // season yet — fetch the prior season so form windows aren't empty.
         stats = await this.statsClient.get('players/statistics', { id: playerId, season: yr - 1 });
       }
 
