@@ -18,8 +18,19 @@
 const Redis = require('ioredis');
 const logger = require('./logger');
 
+const normalizeEnvValue = (value) => {
+  if (value == null) return '';
+  return String(value).trim().replace(/^['\"]|['\"]$/g, '').trim();
+};
+
+const parseBooleanEnv = (value, defaultValue = false) => {
+  const normalized = normalizeEnvValue(value).toLowerCase();
+  if (!normalized) return defaultValue;
+  return normalized === 'true';
+};
+
 // ─── Redis enabled flag ───────────────────────────────────────────────────────
-const REDIS_ENABLED = process.env.REDIS_ENABLED !== 'false';
+const REDIS_ENABLED = parseBooleanEnv(process.env.REDIS_ENABLED, true);
 
 // ─── Build connection config from env ────────────────────────────────────────
 const redisConfig = {
@@ -27,7 +38,7 @@ const redisConfig = {
   port: parseInt(process.env.REDIS_PORT || '6379', 10),
   db: parseInt(process.env.REDIS_DB || '0', 10),
   // TLS required for Upstash and other managed Redis providers
-  ...(process.env.REDIS_TLS === 'true' ? { tls: {} } : {}),
+  ...(parseBooleanEnv(process.env.REDIS_TLS, false) ? { tls: {} } : {}),
   // Retry strategy: exponential back-off up to 30 seconds
   retryStrategy(times) {
     const delay = Math.min(times * 500, 30000);

@@ -1,7 +1,7 @@
 /**
  * Game.model.js — Sports game / event schema (WARM cache layer)
  *
- * Populated by the Morning Scraper cron job (8 AM daily).
+ * Populated by the Morning Scraper cron job (twice daily).
  * Used to:
  *  - Show the list of today's games on the home screen
  *  - Drive the Prop Watcher cron (only fetch props for active/upcoming games)

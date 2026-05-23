@@ -55,7 +55,7 @@ server/
 │   │   ├── errorHandler.middleware.js
 │   │   └── validate.middleware.js
 │   └── jobs/
-│       ├── morningScraper.job.js    # 8 AM — fetch daily schedule
+│       ├── morningScraper.job.js    # 7 AM + 4 PM ET — fetch daily schedule
 │       ├── propWatcher.job.js       # Every 30 min — fetch/score props
 │       └── postGameSync.job.js      # Every 30 min — sync finished games + AI log cleanup
 ```

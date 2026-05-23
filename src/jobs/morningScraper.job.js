@@ -1,5 +1,5 @@
 /**
- * morningScraper.job.js — Daily schedule fetcher (8 AM cron)
+ * morningScraper.job.js — Daily schedule fetcher (twice-daily cron)
  * After saving games to MongoDB, invalidates the Redis schedule cache
  * so the frontend immediately sees fresh data on next request.
  */
@@ -12,7 +12,14 @@ const { getAdapter, getActiveSports } = require('../services/shared/adapterRegis
 const { cacheDel } = require('../config/redis');
 const logger = require('../config/logger');
 
-const MORNING_SCRAPER_SCHEDULE = process.env.CRON_MORNING_SCRAPER_SCHEDULE || '0 8 * * *';
+const normalizeEnvValue = (value) => {
+  if (value == null) return '';
+  const trimmed = String(value).trim();
+  // Railway/env UIs can sometimes persist quoted values literally.
+  return trimmed.replace(/^['\"]|['\"]$/g, '').trim();
+};
+
+const MORNING_SCRAPER_SCHEDULE = normalizeEnvValue(process.env.CRON_MORNING_SCRAPER_SCHEDULE) || '0 7,16 * * *';
 let morningScraperRunning = false;
 
 const runMorningScraper = async () => {
@@ -89,8 +96,25 @@ const runMorningScraperWithLock = async () => {
 };
 
 const registerMorningScraperJob = () => {
-  if (process.env.CRON_MORNING_SCRAPER_ENABLED !== 'true') {
+  const enabledRaw = normalizeEnvValue(process.env.CRON_MORNING_SCRAPER_ENABLED);
+  const enabled = enabledRaw.toLowerCase() === 'true';
+  const scheduleValid = cron.validate(MORNING_SCRAPER_SCHEDULE);
+  logger.info('ℹ️  [MorningScraper] Config', {
+    enabled,
+    enabledRaw: enabledRaw || '(unset)',
+    schedule: MORNING_SCRAPER_SCHEDULE,
+    scheduleValid,
+    tz: process.env.TZ || '(system default)',
+  });
+
+  if (!enabled) {
     logger.info('⏭️  [MorningScraper] Disabled via env');
+    return;
+  }
+  if (!scheduleValid) {
+    logger.error('❌ [MorningScraper] Invalid CRON_MORNING_SCRAPER_SCHEDULE', {
+      schedule: MORNING_SCRAPER_SCHEDULE,
+    });
     return;
   }
   cron.schedule(MORNING_SCRAPER_SCHEDULE, async () => {

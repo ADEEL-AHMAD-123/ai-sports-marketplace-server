@@ -18,6 +18,11 @@ const { getActiveSports } = require('../services/shared/adapterRegistry');
 const { getInjuryStatusesForGame, isInjurySportSupported } = require('../services/injuryService');
 const logger = require('../config/logger');
 
+const normalizeEnvValue = (value) => {
+  if (value == null) return '';
+  return String(value).trim().replace(/^['\"]|['\"]$/g, '').trim();
+};
+
 const DEFAULT_SCHEDULE = '1-59/5 * * * *';
 const LOOKAHEAD_MINUTES = parseInt(process.env.INJURY_REFRESH_LOOKAHEAD_MINUTES || '120', 10);
 const STALE_MINUTES = parseInt(process.env.INJURY_REFRESH_STALE_MINUTES || '15', 10);
@@ -151,12 +156,26 @@ const runInjuryRefreshWithLock = async () => {
 };
 
 const registerInjuryRefreshJob = () => {
-  if (process.env.CRON_INJURY_REFRESH_ENABLED !== 'true') {
+  const enabled = normalizeEnvValue(process.env.CRON_INJURY_REFRESH_ENABLED).toLowerCase() === 'true';
+  const schedule = normalizeEnvValue(process.env.CRON_INJURY_REFRESH_SCHEDULE) || DEFAULT_SCHEDULE;
+  const scheduleValid = cron.validate(schedule);
+
+  logger.info('ℹ️  [InjuryRefresh] Config', {
+    enabled,
+    schedule,
+    scheduleValid,
+    staleMinutes: STALE_MINUTES,
+    lookaheadMinutes: LOOKAHEAD_MINUTES,
+  });
+
+  if (!enabled) {
     logger.info('⏭️  [InjuryRefresh] Cron disabled via CRON_INJURY_REFRESH_ENABLED=false');
     return;
   }
-
-  const schedule = process.env.CRON_INJURY_REFRESH_SCHEDULE || DEFAULT_SCHEDULE;
+  if (!scheduleValid) {
+    logger.error('❌ [InjuryRefresh] Invalid CRON_INJURY_REFRESH_SCHEDULE', { schedule });
+    return;
+  }
 
   cron.schedule(schedule, async () => {
     logger.info('⏰ [InjuryRefresh] Cron triggered');

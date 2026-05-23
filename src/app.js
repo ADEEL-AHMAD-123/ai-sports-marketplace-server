@@ -34,6 +34,19 @@ const adminRoutes   = require('./routes/admin.routes');
 
 const app = express();
 
+// Trust proxy headers in managed deployments (Railway, Render, etc.) so
+// express-rate-limit can resolve client IPs correctly behind load balancers.
+const trustProxyEnv = String(process.env.TRUST_PROXY || '').trim().replace(/^['\"]|['\"]$/g, '').trim();
+if (trustProxyEnv) {
+  if (trustProxyEnv.toLowerCase() === 'true') {
+    app.set('trust proxy', 1);
+  } else {
+    app.set('trust proxy', trustProxyEnv);
+  }
+} else if (process.env.RAILWAY_PROJECT_ID || process.env.RAILWAY_ENVIRONMENT) {
+  app.set('trust proxy', 1);
+}
+
 // ─── Security: Helmet ──────────────────────────────────────────────────────────
 // Sets security-related HTTP headers (XSS protection, clickjacking prevention, etc.)
 app.use(helmet());

@@ -10,6 +10,11 @@ const logger = require('../../config/logger');
 const Insight = require('../../models/Insight.model');
 const { Game, GAME_STATUS } = require('../../models/Game.model');
 
+const normalizeEnvValue = (value) => {
+  if (value == null) return '';
+  return String(value).trim().replace(/^['\"]|['\"]$/g, '').trim();
+};
+
 const SYNCS = {
   nba: require('../sports/nba/postGameSync'),
   mlb: require('../sports/mlb/postGameSync'),
@@ -18,8 +23,8 @@ const SYNCS = {
   soccer: require('../sports/soccer/postGameSync'),
 };
 
-const POST_GAME_SYNC_SCHEDULE = process.env.CRON_POST_GAME_SYNC_SCHEDULE || '*/20 * * * *';
-const POST_GAME_CLEANUP_SCHEDULE = process.env.CRON_POST_GAME_CLEANUP_SCHEDULE || '0 3 * * *';
+const POST_GAME_SYNC_SCHEDULE = normalizeEnvValue(process.env.CRON_POST_GAME_SYNC_SCHEDULE) || '*/20 * * * *';
+const POST_GAME_CLEANUP_SCHEDULE = normalizeEnvValue(process.env.CRON_POST_GAME_CLEANUP_SCHEDULE) || '0 3 * * *';
 const POST_GAME_SYNC_IDLE_MIN_INTERVAL_MINUTES = Math.max(
   20,
   parseInt(process.env.POST_GAME_SYNC_IDLE_MIN_INTERVAL_MINUTES || '60', 10)
@@ -197,8 +202,28 @@ const runDailyCleanupWithLock = async () => {
 };
 
 const registerPostGameSyncJob = () => {
-  if (process.env.CRON_POST_GAME_SYNC_ENABLED !== 'true') {
+  const enabled = normalizeEnvValue(process.env.CRON_POST_GAME_SYNC_ENABLED).toLowerCase() === 'true';
+  const lifecycleScheduleValid = cron.validate(POST_GAME_SYNC_SCHEDULE);
+  const cleanupScheduleValid = cron.validate(POST_GAME_CLEANUP_SCHEDULE);
+  logger.info('ℹ️  [PostGameSync] Config', {
+    enabled,
+    lifecycleSchedule: POST_GAME_SYNC_SCHEDULE,
+    lifecycleScheduleValid,
+    cleanupSchedule: POST_GAME_CLEANUP_SCHEDULE,
+    cleanupScheduleValid,
+  });
+
+  if (!enabled) {
     logger.info('⏭️  [PostGameSync] Disabled');
+    return;
+  }
+  if (!lifecycleScheduleValid || !cleanupScheduleValid) {
+    logger.error('❌ [PostGameSync] Invalid cron schedule configuration', {
+      lifecycleSchedule: POST_GAME_SYNC_SCHEDULE,
+      lifecycleScheduleValid,
+      cleanupSchedule: POST_GAME_CLEANUP_SCHEDULE,
+      cleanupScheduleValid,
+    });
     return;
   }
 

@@ -11,6 +11,11 @@ require('dotenv').config({ path: require('path').resolve(__dirname, '../../../.e
 const cron   = require('node-cron');
 const logger = require('../../config/logger');
 
+const normalizeEnvValue = (value) => {
+  if (value == null) return '';
+  return String(value).trim().replace(/^['\"]|['\"]$/g, '').trim();
+};
+
 const WATCHERS = {
   nba: require('../sports/nba/propWatcher'),
   mlb: require('../sports/mlb/propWatcher'),
@@ -21,7 +26,7 @@ const WATCHERS = {
 
 // Run frequently so policy windows (e.g. every 20m near start) can be honored.
 // Actual API usage is still gated per game by shouldFetchPropsForGame().
-const PROP_WATCHER_SCHEDULE = process.env.CRON_PROP_WATCHER_SCHEDULE || '*/10 * * * *';
+const PROP_WATCHER_SCHEDULE = normalizeEnvValue(process.env.CRON_PROP_WATCHER_SCHEDULE) || '*/10 * * * *';
 let propWatcherRunning = false;
 
 const runPropWatcher = async (sport = null) => {
@@ -68,8 +73,22 @@ const runPropWatcherWithLock = async () => {
 };
 
 const registerPropWatcherJob = () => {
-  if (process.env.CRON_PROP_WATCHER_ENABLED !== 'true') {
+  const enabled = normalizeEnvValue(process.env.CRON_PROP_WATCHER_ENABLED).toLowerCase() === 'true';
+  const scheduleValid = cron.validate(PROP_WATCHER_SCHEDULE);
+  logger.info('ℹ️  [PropWatcher] Config', {
+    enabled,
+    schedule: PROP_WATCHER_SCHEDULE,
+    scheduleValid,
+  });
+
+  if (!enabled) {
     logger.info('⏭️  [PropWatcher] Disabled');
+    return;
+  }
+  if (!scheduleValid) {
+    logger.error('❌ [PropWatcher] Invalid CRON_PROP_WATCHER_SCHEDULE', {
+      schedule: PROP_WATCHER_SCHEDULE,
+    });
     return;
   }
   cron.schedule(PROP_WATCHER_SCHEDULE, async () => {
