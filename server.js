@@ -13,6 +13,8 @@
 
 require('dotenv').config();
 
+const http = require('http');
+const net = require('net');
 const app = require('./src/app');
 const connectDB = require('./src/config/database');
 const { redisClient } = require('./src/config/redis');
@@ -26,7 +28,47 @@ const { registerPostGameSyncJob }    = require('./src/jobs/orchestrators/postGam
 const { registerInjuryRefreshJob }   = require('./src/jobs/injuryRefresh.job');
 const { registerOutcomeCoverageJob } = require('./src/jobs/outcomeCoverage.job');
 
-const PORT = parseInt(process.env.PORT || '5000', 10);
+const DEFAULT_PORT = 5050;
+const CONFIGURED_PORT = parseInt(process.env.PORT || String(DEFAULT_PORT), 10);
+
+const isPortAvailable = (port) => new Promise((resolve) => {
+  const tester = net.createServer();
+
+  tester.once('error', () => resolve(false));
+  tester.once('listening', () => {
+    tester.close(() => resolve(true));
+  });
+
+  tester.listen(port);
+});
+
+const listenWithFallback = async (initialPort) => {
+  const explicitPort = Boolean(process.env.PORT);
+  const canFallback = !explicitPort && (process.env.NODE_ENV || 'development') !== 'production';
+
+  let port = initialPort;
+  if (canFallback) {
+    const maxAttempts = 10;
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      const available = await isPortAvailable(port);
+      if (available) break;
+
+      const fallbackPort = port + 1;
+      logger.warn(`⚠️ Port ${port} is in use. Falling back to ${fallbackPort} for local development.`);
+      port = fallbackPort;
+    }
+  }
+
+  const attemptListen = (listenPort) => new Promise((resolve, reject) => {
+    const server = http.createServer(app);
+
+    server.once('listening', () => resolve({ server, port: listenPort }));
+    server.once('error', reject);
+    server.listen(listenPort);
+  });
+
+  return attemptListen(port);
+};
 
 const startServer = async () => {
   try {
@@ -41,20 +83,20 @@ const startServer = async () => {
     // redis.js logs 'ready' when connected.
 
     // ── Step 3: Start HTTP server ──────────────────────────────────────────
-    const server = app.listen(PORT, () => {
-      logger.info(`✅ Server running on port ${PORT}`, {
-        port: PORT,
-        environment: process.env.NODE_ENV,
-        nodeVersion: process.version,
-      });
+    const { server, port } = await listenWithFallback(CONFIGURED_PORT);
 
-      logger.info('📡 API endpoints:');
-      logger.info(`   Auth:     http://localhost:${PORT}/api/auth`);
-      logger.info(`   Odds:     http://localhost:${PORT}/api/odds`);
-      logger.info(`   Insights: http://localhost:${PORT}/api/insights`);
-      logger.info(`   Credits:  http://localhost:${PORT}/api/credits`);
-      logger.info(`   Health:   http://localhost:${PORT}/health`);
+    logger.info(`✅ Server running on port ${port}`, {
+      port,
+      environment: process.env.NODE_ENV,
+      nodeVersion: process.version,
     });
+
+    logger.info('📡 API endpoints:');
+    logger.info(`   Auth:     http://localhost:${port}/api/auth`);
+    logger.info(`   Odds:     http://localhost:${port}/api/odds`);
+    logger.info(`   Insights: http://localhost:${port}/api/insights`);
+    logger.info(`   Credits:  http://localhost:${port}/api/credits`);
+    logger.info(`   Health:   http://localhost:${port}/health`);
 
     // ── Step 4: Register cron jobs ─────────────────────────────────────────
     registerMorningScraperJob();
