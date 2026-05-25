@@ -299,9 +299,12 @@ const applyNHLFormulas = (rawStats, statType = 'shots_on_goal', context = {}) =>
     forceConfidence = 'low';
   }
 
-  return {
-    // Window averages
-    goalsPerG, assistsPerG, pointsPerG, shotsPerG, toiPerG, ppgPerG, pmPerG,
+  return [
+    ...existing code...
+    '',
+    'Respond ONLY in valid JSON. Your response must be a JSON object with keys: recommendation, confidence, summary, factors, risks, dataQuality.',
+    'Example: {"recommendation": "over", "confidence": 90, "summary": "Player is in strong form.", "factors": ["Recent avg above line"], "risks": ["Tough opponent"], "dataQuality": "strong"}'
+  ].filter(Boolean).join('\n');
     esGoalsPerG, ppGoalsPerG,                  // ES vs PP goal split
     formStatAvg,                                // recency-weighted
     focusStatAvg:    parseFloat(focusStatAvg.toFixed(2)),  // recency-weighted

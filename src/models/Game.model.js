@@ -132,6 +132,22 @@ const gameSchema = new mongoose.Schema(
 
     // When were props last fetched for this game?
     propsLastFetchedAt: Date,
+
+    // When did a user last view this game's props? Drives the prop-polling
+    // "engagement" signal — recently-viewed games earn the fast 10-min cadence.
+    propsLastViewedAt: Date,
+
+    // When did a real user unlock an insight for this game? Set ONLY by the
+    // authenticated unlock endpoint — system/performance auto-unlocks (which
+    // call InsightService directly) deliberately do NOT set it. A game with a
+    // genuine user unlock stays "engaged" through kickoff so its lines stay
+    // fresh for the insight the user paid for.
+    propsUserUnlockedAt: Date,
+
+    // When the outcome-coverage job processed this game (auto-generated its
+    // performance-sample insights). Set once so each game is covered exactly
+    // once, regardless of how many cron cycles see it in the lock window.
+    coverageDoneAt: Date,
   },
   {
     timestamps: true,

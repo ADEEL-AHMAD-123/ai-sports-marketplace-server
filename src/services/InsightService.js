@@ -58,6 +58,9 @@ const logger = require('../config/logger');
 
 const PREFLIGHT_PROP_FRESH_SECONDS = parseInt(process.env.PREFLIGHT_PROP_FRESH_SECONDS || '300', 10);
 const PREFLIGHT_LINE_CACHE_TTL_SECONDS = parseInt(process.env.PREFLIGHT_LINE_CACHE_TTL_SECONDS || '120', 10);
+// A cached insight older than this (hours) is regenerated rather than reused —
+// its injury/form analysis is considered stale even if the line is unchanged.
+const INSIGHT_REUSE_MAX_AGE_HOURS = parseInt(process.env.INSIGHT_REUSE_MAX_AGE_HOURS || '8', 10);
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
@@ -70,17 +73,26 @@ class InsightService {
     statType,
     bettingLine,
     marketType,
-    user,
+    user = null,
     apiSportsPlayerId = null,
+    generatedBy = 'user',
   }) {
-    const logCtx = { sport, eventId, playerName, statType, bettingLine, userId: user._id };
+    // 'system' generations come from the outcome-coverage job — no user, no
+    // credit deduction, no unlockedInsights bookkeeping.
+    const isSystem = generatedBy === 'system';
+    const logCtx = { sport, eventId, playerName, statType, bettingLine, userId: user?._id || null, generatedBy };
     logger.info('🧠 [InsightService] Starting insight generation', logCtx);
 
     // ── STEP 1: MongoDB cold cache ─────────────────────────────────────────
-    const existing = await Insight.findExisting({ sport, eventId, playerName, statType, bettingLine });
+    // maxAgeHours: an insight older than this is treated as a miss so stale
+    // analysis (injuries/form moved on) is regenerated rather than reused.
+    const existing = await Insight.findExisting({
+      sport, eventId, playerName, statType, bettingLine,
+      maxAgeHours: INSIGHT_REUSE_MAX_AGE_HOURS,
+    });
     if (existing) {
       logger.info('⚡ [InsightService] Cache HIT', logCtx);
-      if (!user.hasUnlockedInsight(existing._id)) {
+      if (user && !user.hasUnlockedInsight(existing._id)) {
         await User.findByIdAndUpdate(user._id, { $addToSet: { unlockedInsights: existing._id } });
         await Insight.findByIdAndUpdate(existing._id, { $inc: { unlockCount: 1 } });
       }
@@ -160,7 +172,7 @@ class InsightService {
         logger.debug('[InsightService] Cache leagueContext refresh skipped (non-critical)', { error: err.message });
       }
       
-      return { insight: existing, creditDeducted: false };
+      return { insight: existing, creditDeducted: false, cached: true };
     }
 
     logger.info('💨 [InsightService] Cache MISS — generating', logCtx);
@@ -381,6 +393,7 @@ class InsightService {
       marketType,
       bettingLine,
       recommendation,
+      generatedBy,
       injuryStatus:      storedInjuryStatus,
       injuryReason:      storedInjuryReason,
       insightSummary:    parsed.summary     || '',
@@ -508,9 +521,13 @@ class InsightService {
     logger.info('✅ [InsightService] Insight saved', { ...logCtx, insightId: insight._id });
 
     // ── STEP 10: Deduct credit ─────────────────────────────────────────────
-    await this._deductCredit({ user, insight, logCtx });
+    // System (coverage) generations have no user and never deduct.
+    if (!isSystem && user) {
+      await this._deductCredit({ user, insight, logCtx });
+      return { insight: insight.toObject(), creditDeducted: true, cached: false };
+    }
 
-    return { insight: insight.toObject(), creditDeducted: true };
+    return { insight: insight.toObject(), creditDeducted: false, cached: false };
   }
 
   // ─── Game-personalization payload ──────────────────────────────────────────

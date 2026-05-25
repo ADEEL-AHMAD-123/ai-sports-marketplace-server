@@ -1,7 +1,8 @@
 /**
  * propPollingPolicy.test.js
  *
- * Verifies the 48h-track / 30h-refresh split and the tiered refresh cadence.
+ * Verifies the 48h-track / 30h-refresh split, the tiered pre-game cadence,
+ * and the status-driven 10-minute "live" tier.
  */
 
 const {
@@ -10,54 +11,95 @@ const {
 } = require('../../src/jobs/sports/shared/propPollingPolicy');
 
 const NOW = new Date('2026-05-21T12:00:00Z');
-// Build a game whose startTime is `hours` from NOW (negative = already started).
-const gameAt = (hours, propsLastFetchedAt = null) => ({
+// Game `hours` from NOW (negative = already started); status defaults to scheduled.
+const gameAt = (hours, propsLastFetchedAt = null, status = 'scheduled') => ({
   startTime: new Date(NOW.getTime() + hours * 3600000),
   propsLastFetchedAt,
+  status,
 });
 const minsAgo = (m) => new Date(NOW.getTime() - m * 60000);
 
 describe('getPropFetchWindow', () => {
-  it('loads the full 48h track window (not the 30h refresh window)', () => {
+  it('loads 48h ahead and reaches back to cover in-progress live games', () => {
     const { start, end } = getPropFetchWindow(NOW);
     expect((end - NOW) / 3600000).toBe(48);
-    expect((NOW - start) / 60000).toBe(180); // tail cutoff = 3h
+    expect((NOW - start) / 3600000).toBe(6); // live poll window
   });
 });
 
-describe('shouldFetchPropsForGame', () => {
-  it('does NOT refresh a game beyond the 30h refresh window (tracked only)', () => {
+describe('shouldFetchPropsForGame — scheduled tiers', () => {
+  it('does NOT refresh a scheduled game beyond the 30h refresh window', () => {
     expect(shouldFetchPropsForGame(gameAt(40), NOW)).toBe(false);
     expect(shouldFetchPropsForGame(gameAt(31), NOW)).toBe(false);
-  });
-
-  it('does NOT poll a game long past the tail window', () => {
-    expect(shouldFetchPropsForGame(gameAt(-4), NOW)).toBe(false);
   });
 
   it('fetches immediately the first time a game enters the refresh window', () => {
     expect(shouldFetchPropsForGame(gameAt(28, null), NOW)).toBe(true);
   });
 
-  it('far tier (12-30h): refreshes every 6h', () => {
+  it('far tier (12-30h): every 6h', () => {
     expect(shouldFetchPropsForGame(gameAt(20, minsAgo(120)), NOW)).toBe(false);
     expect(shouldFetchPropsForGame(gameAt(20, minsAgo(370)), NOW)).toBe(true);
   });
 
-  it('near tier (1.5-6h): refreshes every 60m', () => {
+  it('mid tier (6-12h): every 3h', () => {
+    expect(shouldFetchPropsForGame(gameAt(9, minsAgo(120)), NOW)).toBe(false);
+    expect(shouldFetchPropsForGame(gameAt(9, minsAgo(190)), NOW)).toBe(true);
+  });
+
+  it('near tier (1-6h): every 60m', () => {
     expect(shouldFetchPropsForGame(gameAt(4, minsAgo(40)), NOW)).toBe(false);
     expect(shouldFetchPropsForGame(gameAt(4, minsAgo(70)), NOW)).toBe(true);
   });
 
-  it('hot tier (around kickoff): refreshes every 25m', () => {
-    expect(shouldFetchPropsForGame(gameAt(0.2, minsAgo(10)), NOW)).toBe(false);
-    expect(shouldFetchPropsForGame(gameAt(0.2, minsAgo(30)), NOW)).toBe(true);
+  it('hot tier (final hour before kickoff): every 10m', () => {
+    expect(shouldFetchPropsForGame(gameAt(0.5, minsAgo(7)), NOW)).toBe(false);
+    expect(shouldFetchPropsForGame(gameAt(0.5, minsAgo(12)), NOW)).toBe(true);
+  });
+});
+
+describe('shouldFetchPropsForGame — live tier (status-driven)', () => {
+  it('refreshes a LIVE game every ~10m regardless of how long ago it started', () => {
+    expect(shouldFetchPropsForGame(gameAt(-2, minsAgo(6), 'live'), NOW)).toBe(false);
+    expect(shouldFetchPropsForGame(gameAt(-2, minsAgo(12), 'live'), NOW)).toBe(true);
   });
 
-  it('refreshes more often near kickoff than far out (tier ordering)', () => {
-    // 45m of elapsed time: enough for the hot tier (25m) but not the far tier (360m)
-    const elapsed = minsAgo(45);
-    expect(shouldFetchPropsForGame(gameAt(0, elapsed), NOW)).toBe(true);   // hot
-    expect(shouldFetchPropsForGame(gameAt(20, elapsed), NOW)).toBe(false); // far
+  it('treats a just-started game still flagged scheduled as hot (10m)', () => {
+    // start passed ~15m ago, postGameSync has not flipped it to LIVE yet
+    expect(shouldFetchPropsForGame(gameAt(-0.25, minsAgo(12), 'scheduled'), NOW)).toBe(true);
+  });
+
+  it('stops polling a game long past the live window', () => {
+    expect(shouldFetchPropsForGame(gameAt(-7, minsAgo(999), 'live'), NOW)).toBe(false);
+  });
+});
+
+describe('shouldFetchPropsForGame — engagement filter', () => {
+  it('cold game in the hot window uses the sparse 60m cadence, not 10m', () => {
+    const g = gameAt(0.5, minsAgo(20));
+    expect(shouldFetchPropsForGame(g, NOW, { engaged: false })).toBe(false); // 20m < 60m
+    expect(shouldFetchPropsForGame(g, NOW, { engaged: true })).toBe(true);   // 20m >= 10m
+  });
+
+  it('cold LIVE game uses the sparse 60m cadence, not 10m', () => {
+    const g = gameAt(-1, minsAgo(20), 'live');
+    expect(shouldFetchPropsForGame(g, NOW, { engaged: false })).toBe(false);
+    expect(shouldFetchPropsForGame(g, NOW, { engaged: true })).toBe(true);
+  });
+
+  it('cold game skips the far tier entirely (12-30h out)', () => {
+    const g = gameAt(20, minsAgo(999));
+    expect(shouldFetchPropsForGame(g, NOW, { engaged: false })).toBe(false);
+    expect(shouldFetchPropsForGame(g, NOW, { engaged: true })).toBe(true);
+  });
+
+  it('near/mid tiers are identical for cold and engaged games', () => {
+    const near = gameAt(4, minsAgo(70));
+    expect(shouldFetchPropsForGame(near, NOW, { engaged: false })).toBe(true);
+    expect(shouldFetchPropsForGame(near, NOW, { engaged: true })).toBe(true);
+  });
+
+  it('defaults to engaged when no option is passed', () => {
+    expect(shouldFetchPropsForGame(gameAt(0.5, minsAgo(12)), NOW)).toBe(true);
   });
 });

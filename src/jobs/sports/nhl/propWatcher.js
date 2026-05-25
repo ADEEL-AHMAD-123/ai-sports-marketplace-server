@@ -19,6 +19,7 @@ const logger                 = require('../../../config/logger');
 const NHLInjuryService       = require('../../../services/sports/nhl/NHLInjuryService');
 const NHLStatsClient         = require('../../../services/sports/nhl/NHLStatsClient');
 const { shouldFetchPropsForGame, getPropFetchWindow } = require('../shared/propPollingPolicy');
+const { getEngagedEventIds } = require('../shared/propEngagement');
 
 const SPORT = 'nhl';
 
@@ -51,11 +52,15 @@ async function run() {
 
   if (!games.length) { logger.info(`[${SPORT}PropWatcher] No games`); return { upserted: 0 }; }
 
+  // Engaged games (insights / recent views) earn the fast 10-min cadence.
+  const engagedEventIds = await getEngagedEventIds(games, now);
+
   let totalUpserted = 0;
   let totalScratched = 0;
 
   for (const game of games) {
-    if (!shouldFetchPropsForGame(game, now)) continue;
+    const engaged = engagedEventIds.has(String(game.oddsEventId));
+    if (!shouldFetchPropsForGame(game, now, { engaged })) continue;
 
     const rawProps = await adapter.fetchProps(game.oddsEventId);
     if (!rawProps.length) continue;

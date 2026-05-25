@@ -20,10 +20,11 @@ const logger = require('./src/config/logger');
 const JobQueueService = require('./src/services/queue/JobQueueService');
 
 // ── Cron Jobs ──────────────────────────────────────────────────────────────────
-const { registerMorningScraperJob } = require('./src/jobs/morningScraper.job');
-const { registerPropWatcherJob }    = require('./src/jobs/orchestrators/propWatcher.job');
-const { registerPostGameSyncJob }   = require('./src/jobs/orchestrators/postGameSync.job');
-const { registerInjuryRefreshJob }  = require('./src/jobs/injuryRefresh.job');
+const { registerMorningScraperJob }  = require('./src/jobs/morningScraper.job');
+const { registerPropWatcherJob }     = require('./src/jobs/orchestrators/propWatcher.job');
+const { registerPostGameSyncJob }    = require('./src/jobs/orchestrators/postGameSync.job');
+const { registerInjuryRefreshJob }   = require('./src/jobs/injuryRefresh.job');
+const { registerOutcomeCoverageJob } = require('./src/jobs/outcomeCoverage.job');
 
 const PORT = parseInt(process.env.PORT || '5000', 10);
 
@@ -60,6 +61,7 @@ const startServer = async () => {
     registerPropWatcherJob();
     registerPostGameSyncJob();
     registerInjuryRefreshJob();
+    registerOutcomeCoverageJob();
 
     if (JobQueueService.isEnabled()) {
       await JobQueueService.startWorkers();

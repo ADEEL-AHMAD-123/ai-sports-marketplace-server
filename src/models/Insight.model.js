@@ -192,6 +192,20 @@ const insightSchema = new mongoose.Schema(
       index: true,
     },
 
+    // Who triggered this insight's generation:
+    //   'user'   — a real user unlocked it via the HTTP unlock endpoint
+    //   'system' — the outcome-coverage job auto-generated it so there is
+    //              always a representative graded sample for performance
+    //              stats and the public proof feeds
+    // Both kinds are graded identically; this field is purely for analytics
+    // and so the engagement signal can ignore system insights.
+    generatedBy: {
+      type: String,
+      enum: ['user', 'system'],
+      default: 'user',
+      index: true,
+    },
+
     // ── Odds snapshot (for stale detection) ──────────────────────────────────
     // We store the betting line at the time of generation.
     // During pre-flight check, if current line differs by > ODDS_CHANGE_THRESHOLD,
@@ -386,6 +400,10 @@ insightSchema.index({ aiLogExpiresAt: 1 });
  * Returns null if not found or if the status is stale/failed.
  *
  * @param {Object} params
+ * @param {number} [params.maxAgeHours]  When set, an insight older than this
+ *        many hours is treated as not-found — the caller (InsightService) then
+ *        regenerates fresh analysis. Omit it (e.g. the controller's
+ *        "did this user already unlock it" check) to match regardless of age.
  * @returns {Promise<Insight|null>}
  */
 insightSchema.statics.findExisting = async function ({
@@ -394,15 +412,20 @@ insightSchema.statics.findExisting = async function ({
   playerName,
   statType,
   bettingLine,
+  maxAgeHours = null,
 }) {
-  return this.findOne({
+  const query = {
     sport,
     eventId,
     playerName,
     statType,
     bettingLine,
     status: INSIGHT_STATUS.GENERATED,
-  }).lean(); // .lean() returns plain JS object — faster for read-only operations
+  };
+  if (Number.isFinite(maxAgeHours) && maxAgeHours > 0) {
+    query.createdAt = { $gte: new Date(Date.now() - maxAgeHours * 3600 * 1000) };
+  }
+  return this.findOne(query).lean(); // .lean() — plain JS object, faster for read-only
 };
 
 const Insight = mongoose.model('Insight', insightSchema);

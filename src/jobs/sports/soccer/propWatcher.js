@@ -11,6 +11,7 @@ const SoccerInjuryService = require('../../../services/sports/soccer/SoccerInjur
 const { cacheDel } = require('../../../config/redis');
 const { ODDS_CHANGE_THRESHOLD, INSIGHT_STATUS } = require('../../../config/constants');
 const { shouldFetchPropsForGame, getPropFetchWindow } = require('../shared/propPollingPolicy');
+const { getEngagedEventIds } = require('../shared/propEngagement');
 const logger = require('../../../config/logger');
 
 const SPORT = 'soccer';
@@ -41,12 +42,16 @@ async function run() {
     return { upserted: 0 };
   }
 
+  // Engaged games (insights / recent views) earn the fast 10-min cadence.
+  const engagedEventIds = await getEngagedEventIds(games, now);
+
   let totalUpserted = 0;
   const touchedEventIds = new Set();
 
   const results = await _mapGamesWithConcurrency(games, async (game) => {
     try {
-      if (!shouldFetchPropsForGame(game, now)) {
+      const engaged = engagedEventIds.has(String(game.oddsEventId));
+      if (!shouldFetchPropsForGame(game, now, { engaged })) {
         return { upserted: 0, touchedEventId: null };
       }
 

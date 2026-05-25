@@ -99,6 +99,14 @@ const getProps = async (req, res, next) => {
     const { filter }   = req.query;
     const cacheKey     = `${CACHE_KEYS.PROPS}:${sport}:${eventId}:${filter || 'all'}`;
 
+    // Mark this game as recently viewed — feeds the prop-polling engagement
+    // signal so viewed games earn the fast refresh cadence. Fire-and-forget:
+    // a tracking write must never delay or fail the props response.
+    Game.updateOne(
+      { sport, oddsEventId: eventId },
+      { $set: { propsLastViewedAt: new Date() } }
+    ).catch(() => {});
+
     const cached = await cacheGet(cacheKey);
     if (cached) {
       logger.debug(`⚡ [OddsController] Cache HIT — props for ${eventId}`);

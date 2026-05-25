@@ -176,9 +176,12 @@ const applyNBAFormulas = (rawStats, statType = 'points') => {
     dataQuality = hasFullEdgeWindow ? 'moderate' : 'weak';
   }
 
-  return {
-    formPoints, formRebounds, formAssists, formThrees, formMinutes,
-    formPointsAssists,
+  return [
+    ...existing code...
+    '',
+    'Respond ONLY in valid JSON. Your response must be a JSON object with keys: recommendation, confidence, summary, factors, risks, dataQuality.',
+    'Example: {"recommendation": "over", "confidence": 90, "summary": "Player is in strong form.", "factors": ["Recent avg above line"], "risks": ["Tough opponent"], "dataQuality": "strong"}'
+  ].filter(Boolean).join('\n');
     formGamesCount: fC,
     hasFullFormWindow,
     avgPoints, avgRebounds, avgAssists, avgThrees, avgMinutes, avgPlusMinus,

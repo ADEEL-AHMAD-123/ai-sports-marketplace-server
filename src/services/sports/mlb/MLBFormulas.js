@@ -296,7 +296,7 @@ const buildMLBPrompt = ({
     ? buildPlatoonBlock(platoonContext.matchup)
     : '';
 
-  return `You are an expert MLB prop betting analyst. Respond with ONLY a JSON object.
+  return `You are an expert MLB prop betting analyst.
 
 PLAYER: ${playerName} (${isPitcher ? 'PITCHER' : 'BATTER'}) | STAT: ${label} | LINE: ${bettingLine}
 SIGNAL: ${signal} (${edgeCount}-game avg ${focusAvg} vs line ${bettingLine})
@@ -314,8 +314,8 @@ ANALYST RULES:
   - Pitcher K's: most predictable stat, park factor has minimal effect on Ks
   - Partial windows [PARTIAL] → increase uncertainty, lean toward "moderate" confidence
 
-Return exactly:
-{"recommendation":"over"|"under","confidence":"low"|"medium"|"high","summary":"≤25 words citing key number","factors":["specific stat + window","second data point","matchup context if available"],"risks":["primary risk"],"dataQuality":"strong"|"moderate"|"weak"}`;
+Respond ONLY in valid JSON. Your response must be a JSON object with keys: recommendation, confidence, summary, factors, risks, dataQuality.
+Example: {"recommendation": "over", "confidence": 90, "summary": "Player is in strong form.", "factors": ["Recent avg above line"], "risks": ["Tough opponent"], "dataQuality": "strong"}`;
 };
 
 module.exports = { applyMLBFormulas, applyMLBBatterFormulas, applyMLBPitcherFormulas, buildMLBPrompt, parseIP };

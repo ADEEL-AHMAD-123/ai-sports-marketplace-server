@@ -10,6 +10,7 @@
 const InsightService = require('../services/InsightService');
 const Insight = require('../models/Insight.model');
 const PlayerProp = require('../models/PlayerProp.model');
+const { Game } = require('../models/Game.model');
 const JobQueueService = require('../services/queue/JobQueueService');
 const { HTTP_STATUS, CREDITS, INSIGHT_STATUS } = require('../config/constants');
 const { AppError } = require('../middleware/errorHandler.middleware');
@@ -90,6 +91,16 @@ const unlockInsight = async (req, res, next) => {
       statType,
       bettingLine,
     });
+
+    // Mark genuine user engagement on the game. Reaching this authenticated
+    // HTTP endpoint means a real user is unlocking an insight for this game,
+    // so its props earn the fast refresh cadence through kickoff. System /
+    // performance auto-unlocks call InsightService directly and never hit
+    // this controller, so they correctly leave this unset. Fire-and-forget.
+    Game.updateOne(
+      { oddsEventId: eventId },
+      { $set: { propsUserUnlockedAt: new Date() } }
+    ).catch(() => {});
 
     // ── Check if user already has this insight unlocked ──────────────────────
     // If so, fetch and return for free (no credit check needed)
