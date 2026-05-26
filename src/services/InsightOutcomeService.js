@@ -333,6 +333,12 @@ class InsightOutcomeService {
       band.label
     ));
 
+    // Per-stat-type accuracy — every distinct statType present in the graded
+    // set (NBA points/rebounds/…, MLB hits/strikeouts/…, etc.).
+    const statTypeRows = [...new Set(resolved.map(r => r.statType).filter(Boolean))]
+      .sort()
+      .map(st => buildBandSummary(resolved.filter(r => r.statType === st), st));
+
     const summary = {
       scannedInsights:  insights.length,
       startedInsights:  started.length,
@@ -347,6 +353,7 @@ class InsightOutcomeService {
       byResult:         { win: wins, loss: losses, push: pushes },
       bySport:          Object.fromEntries(bySportRows.map(r  => [r.label, r])),
       byConfidence:     Object.fromEntries(byConfidenceRows.map(r => [r.label, r])),
+      byStatType:       Object.fromEntries(statTypeRows.map(r => [r.label, r])),
     };
 
     if (includeSamples) {

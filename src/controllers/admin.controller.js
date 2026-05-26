@@ -266,21 +266,25 @@ const getUserDetail = async (req, res, next) => {
 
 const adjustUserCredits = async (req, res, next) => {
   try {
-    const { amount, reason } = req.body;
-    if (!amount || isNaN(amount)) {
+    // Accept both 'amount' and 'delta' for compatibility
+    let { amount, delta, reason } = req.body;
+    if (typeof delta !== 'undefined') amount = delta;
+    if (amount === undefined || amount === null || isNaN(amount) || Number(amount) === 0) {
       throw new AppError('Invalid amount', HTTP_STATUS.BAD_REQUEST);
     }
+
+    amount = parseInt(amount, 10);
 
     const user = await User.findById(req.params.id);
     if (!user) throw new AppError('User not found', HTTP_STATUS.NOT_FOUND);
 
-    const newBalance = user.credits + parseInt(amount);
-    await User.findByIdAndUpdate(user._id, { $inc: { credits: parseInt(amount) } });
+    const newBalance = user.credits + amount;
+    await User.findByIdAndUpdate(user._id, { $inc: { credits: amount } });
 
     await Transaction.create({
       userId: user._id,
       type: TRANSACTION_TYPES.ADMIN_GRANT,
-      creditDelta: parseInt(amount),
+      creditDelta: amount,
       balanceAfter: newBalance,
       description: reason || `Admin credit adjustment: ${amount > 0 ? '+' : ''}${amount}`,
     });

@@ -245,29 +245,37 @@ class InsightService {
     // ── STEP 4: Apply formulas ─────────────────────────────────────────────
     // For NHL, derive opposing team abbrev + player position so head-to-head,
     // home/away splits, and position-aware TOI thresholds compute correctly.
-    let formulaContext = { isPitcher: statType === 'pitcher_strikeouts' };
-    if (sport === 'nhl') {
-      try {
-        const NHLStatsClient = require('./sports/nhl/NHLStatsClient');
-        const playerTeam     = prop?.playerTeam || null;       // 'home' | 'away' | null
-        let opposingTeamName = null;
-        if (playerTeam === 'home')      opposingTeamName = prop?.awayTeamName;
-        else if (playerTeam === 'away') opposingTeamName = prop?.homeTeamName;
-        const opposingTeamAbbrev = opposingTeamName
-          ? NHLStatsClient.getTeamAbbrev(opposingTeamName)
-          : null;
-        const position = rawStats?.__playerInfo?.position || null;
-        formulaContext = {
-          ...formulaContext,
-          opposingTeamAbbrev,
-          playerSide: playerTeam,
-          position,
-        };
-      } catch (e) {
-        logger.debug('[InsightService] NHL formula context derive failed (non-fatal)', { error: e.message });
+    let processedStats;
+    if (sport === 'soccer') {
+      // Baseline from the adapter formulas. The soccer pipeline may supply
+      // richer processedStats — that override is applied after STEP 6 below,
+      // once sportCtx exists (sportCtx is declared in STEP 6).
+      processedStats = adapter.applyFormulas(rawStats, statType);
+    } else {
+      let formulaContext = { isPitcher: statType === 'pitcher_strikeouts' };
+      if (sport === 'nhl') {
+        try {
+          const NHLStatsClient = require('./sports/nhl/NHLStatsClient');
+          const playerTeam     = prop?.playerTeam || null;       // 'home' | 'away' | null
+          let opposingTeamName = null;
+          if (playerTeam === 'home')      opposingTeamName = prop?.awayTeamName;
+          else if (playerTeam === 'away') opposingTeamName = prop?.homeTeamName;
+          const opposingTeamAbbrev = opposingTeamName
+            ? NHLStatsClient.getTeamAbbrev(opposingTeamName)
+            : null;
+          const position = rawStats?.__playerInfo?.position || null;
+          formulaContext = {
+            ...formulaContext,
+            opposingTeamAbbrev,
+            playerSide: playerTeam,
+            position,
+          };
+        } catch (e) {
+          logger.debug('[InsightService] NHL formula context derive failed (non-fatal)', { error: e.message });
+        }
       }
+      processedStats = adapter.applyFormulas(rawStats, statType, formulaContext);
     }
-    const processedStats = adapter.applyFormulas(rawStats, statType, formulaContext);
     logger.debug('📐 [InsightService] Formulas applied', logCtx);
 
     // ── STEP 5: Injury context ─────────────────────────────────────────────
@@ -318,6 +326,12 @@ class InsightService {
         );
       }
     } catch { /* non-fatal — insight generates without sport context */ }
+
+    // Soccer: prefer the pipeline's processedStats when it supplies them
+    // (sportCtx is only available now, after STEP 6).
+    if (sport === 'soccer' && sportCtx?.processedStats) {
+      processedStats = sportCtx.processedStats;
+    }
 
     // Unpack — each adapter.buildPrompt() receives the context keys it expects
     // NBA
@@ -440,6 +454,12 @@ class InsightService {
       slg:                processedStats?.slg               ?? null,
       ops:                processedStats?.ops               ?? null,
       formStatAvg:        processedStats?.formStatAvg       ?? null,
+      // Soccer fields — per-game averages (read by InsightModal soccer panel)
+      soccerGoalsPerG:         processedStats?.goalsPerG          ?? null,
+      soccerAssistsPerG:       processedStats?.assistsPerG        ?? null,
+      soccerShotsOnTargetPerG: processedStats?.shotsOnTargetPerG  ?? null,
+      soccerMinutesPerG:       processedStats?.minutesPerG        ?? null,
+      soccerConversionPct:     processedStats?.conversionPct      ?? null,
       // MLB pitcher fields
       kPerStart:          processedStats?.kPerStart         ?? null,
       ipPerStart:         processedStats?.ipPerStart        ?? null,

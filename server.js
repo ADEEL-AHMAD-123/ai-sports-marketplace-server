@@ -28,7 +28,7 @@ const { registerPostGameSyncJob }    = require('./src/jobs/orchestrators/postGam
 const { registerInjuryRefreshJob }   = require('./src/jobs/injuryRefresh.job');
 const { registerOutcomeCoverageJob } = require('./src/jobs/outcomeCoverage.job');
 
-const DEFAULT_PORT = 5050;
+const DEFAULT_PORT = 5000;
 const CONFIGURED_PORT = parseInt(process.env.PORT || String(DEFAULT_PORT), 10);
 
 const isPortAvailable = (port) => new Promise((resolve) => {

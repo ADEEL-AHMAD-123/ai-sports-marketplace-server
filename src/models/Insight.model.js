@@ -271,6 +271,13 @@ const insightSchema = new mongoose.Schema(
     isPlayoffGame:      { type: Boolean, default: false },
     playoffRound:       { type: String,  default: null },
 
+    // Soccer — per-game averages (read by InsightModal soccer panel)
+    soccerGoalsPerG:         { type: Number, default: null },
+    soccerAssistsPerG:       { type: Number, default: null },
+    soccerShotsOnTargetPerG: { type: Number, default: null },
+    soccerMinutesPerG:       { type: Number, default: null },
+    soccerConversionPct:     { type: Number, default: null },
+
     // NBA
     formPoints:         { type: Number, default: null },
     formRebounds:       { type: Number, default: null },

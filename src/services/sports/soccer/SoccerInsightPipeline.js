@@ -77,16 +77,34 @@ function _buildMatchContext(game) {
   };
 }
 
+
+const { applySoccerFormulas } = require('./SoccerFormulas');
+const SoccerAdapter = require('./SoccerAdapter');
+
 async function getInsightContext(prop, game) {
-  if (!game) return { matchContext: null, teamContext: null };
+  if (!game || !prop) return { matchContext: null, teamContext: null, processedStats: {} };
 
   try {
     const start    = _safeDate(game.startTime);
-    if (!start) return { matchContext: null, teamContext: null };
+    if (!start) return { matchContext: null, teamContext: null, processedStats: {} };
 
     const homeName = game?.homeTeam?.name || null;
     const awayName = game?.awayTeam?.name || null;
     const leagueId = game?.leagueId       || null;
+    const playerName = prop.playerName;
+    const statType = prop.statType;
+
+    // Fetch player match logs using SoccerAdapter
+    const adapter = new SoccerAdapter();
+    const rawStats = await adapter.fetchPlayerStats({
+      playerName,
+      homeTeamName: homeName,
+      awayTeamName: awayName,
+      leagueId,
+    });
+
+    // Compute per-game averages and recent form
+    const processedStats = applySoccerFormulas(rawStats, statType);
 
     const [homeForm, awayForm] = await Promise.all([
       _teamRecentForm(homeName, leagueId, start),
@@ -101,10 +119,11 @@ async function getInsightContext(prop, game) {
         homeForm,
         awayForm,
       },
+      processedStats,
     };
   } catch (err) {
     logger.warn('[SoccerInsightPipeline] context failed (non-fatal)', { error: err.message });
-    return { matchContext: null, teamContext: null };
+    return { matchContext: null, teamContext: null, processedStats: {} };
   }
 }
 
