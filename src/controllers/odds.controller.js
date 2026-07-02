@@ -50,16 +50,23 @@ const getGames = async (req, res, next) => {
     const cached = await cacheGet(cacheKey);
     if (cached) {
       logger.debug(`⚡ [OddsController] Cache HIT — games for ${sport}`);
-      const visibleGames = _onlyGamesWithProps(cached);
+      // No hasProps filter: games in the 30-48h track window are shown even
+      // before their first prop fetch, per the tracked/refresh policy split.
       return res.status(HTTP_STATUS.OK).json({
         success: true, source: 'cache',
-        data: _hydrateTeamLogos(visibleGames),
+        data: _hydrateTeamLogos(cached),
       });
     }
 
-    const now         = new Date();
-    const windowStart = new Date(now.getTime() - 3  * 60 * 60 * 1000);
-    const windowEnd   = new Date(now.getTime() + 72 * 60 * 60 * 1000);
+    const now = new Date();
+    // The DISPLAY window is intentionally wider than the propWatcher's track
+    // window (48h) because weekly sports (NFL, soccer weekend fixtures) would
+    // otherwise show empty most days even in-season. Games loaded here that
+    // sit beyond the 48h track window simply render with a "Lines Pending"
+    // chip until they cross into the polling range — no extra API spend.
+    const displayHours = Math.max(24, parseInt(process.env.GAME_LIST_WINDOW_HOURS || '168', 10));
+    const windowStart  = new Date(now.getTime() - 3 * 60 * 60 * 1000);
+    const windowEnd    = new Date(now.getTime() + displayHours * 60 * 60 * 1000);
 
     let games = await Game.find({
       sport,
@@ -78,9 +85,10 @@ const getGames = async (req, res, next) => {
       logger.info(`[OddsController] Fallback found ${games.length} games for ${sport}`);
     }
 
-    const enriched  = await _enrichGamesWithPropStats(games, sport);
-    const visibleGames = _onlyGamesWithProps(enriched);
-    const hydrated  = _hydrateTeamLogos(visibleGames);
+    const enriched = await _enrichGamesWithPropStats(games, sport);
+    // Return every tracked game — the frontend can render a "props updating"
+    // state for cards where propCount === 0 / hasProps is false.
+    const hydrated = _hydrateTeamLogos(enriched);
 
     await cacheSet(cacheKey, hydrated, CACHE_TTL.SCHEDULE);
     logger.debug(`[OddsController] Games fetched from DB for ${sport}: ${games.length}`);
@@ -365,11 +373,6 @@ const _hydrateTeamLogos = (games) => {
       awayTeam: awayTeam ? { ...awayTeam, logoUrl: _resolveTeamLogoUrl(game.sport, awayTeam) } : awayTeam,
     };
   });
-};
-
-const _onlyGamesWithProps = (games) => {
-  if (!Array.isArray(games) || !games.length) return games || [];
-  return games.filter((game) => (game?.hasProps === true) || ((game?.propCount || 0) > 0));
 };
 
 // ── Refresh Props ───────────────────────────────────────────────────────────

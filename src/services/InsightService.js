@@ -672,15 +672,37 @@ class InsightService {
         } : null,
         ballpark: sportCtx?.parkContext ? {
           homeTeamName: sportCtx.parkContext.homeTeamName,
+          // Expose the venue's proper name + factor so the modal can show
+          // "Citizens Bank Park · +6% hitter-friendly" instead of just team.
+          venueName:    sportCtx.parkContext.venueName    ?? null,
+          parkFactor:   sportCtx.parkContext.parkFactor   ?? null,
+          hrFactor:     sportCtx.parkContext.hrFactor     ?? null,
         } : null,
-        platoon: sportCtx?.platoonContext?.matchup
-          ? {
-              batterHand:  sportCtx.platoonContext.matchup.batterHand  || null,
-              pitcherHand: sportCtx.platoonContext.matchup.pitcherHand || null,
-              edge:        sportCtx.platoonContext.matchup.edge        || null,
-              note:        sportCtx.platoonContext.matchup.note        || null,
-            }
-          : null,
+        platoon: (() => {
+          const m = sportCtx?.platoonContext?.matchup;
+          if (!m) return null;
+          // Map MLBPlatoonService's `advantage` classification onto the
+          // frontend-facing `edge` string (used by InsightModal to pick chip
+          // color: 'favorable' → green, 'tough' → red, else neutral/no chip).
+          const edgeMap = {
+            strong_favor:   'favorable',
+            slight_favor:   'favorable',
+            strong_against: 'tough',
+            slight_against: 'tough',
+          };
+          return {
+            batterHand:  m.batterHand  || null,
+            pitcherHand: m.pitcherHand || null,
+            edge:        edgeMap[m.advantage] || null,
+            note:        m.typicalLabel || m.matchupLabel || null,
+            // Concrete numbers so the modal can render "vs R .230 / vs L .298
+            // (226 AB)" instead of an abstract "tough" chip.
+            matchupAvg:  m.matchupAvg  ?? null,
+            oppositeAvg: m.oppositeAvg ?? null,
+            matchupABs:  m.matchupABs  ?? null,
+            delta:       m.delta       ?? null,
+          };
+        })(),
       };
     }
 

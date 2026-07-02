@@ -11,6 +11,8 @@ const { Game } = require('../models/Game.model');
 const { getAdapter, getActiveSports } = require('../services/shared/adapterRegistry');
 const { cacheDel } = require('../config/redis');
 const logger = require('../config/logger');
+// Lock-safe wrapper so we don't collide with the */10 propWatcher cron.
+const { runPropWatcherWithLock } = require('./orchestrators/propWatcher.job');
 
 const normalizeEnvValue = (value) => {
   if (value == null) return '';
@@ -76,6 +78,19 @@ const runMorningScraper = async () => {
   }
 
   logger.info('✅ [MorningScraper] Daily scrape complete', { results });
+
+  // Warm-kick the prop watcher — populate props for games that just entered
+  // the refresh window so users hitting the site right after the scrape see
+  // real data instead of empty cards. Uses the lock-safe wrapper so a cycle
+  // that happens to be running in parallel (the */10 cron) is skipped, not
+  // duplicated. Non-fatal: a warm-run failure never breaks the scrape.
+  try {
+    logger.info('🚀 [MorningScraper] Kicking off prop-watcher warm run...');
+    await runPropWatcherWithLock();
+  } catch (err) {
+    logger.warn('[MorningScraper] Warm prop-watcher run failed (non-fatal)', { error: err.message });
+  }
+
   return results;
 };
 

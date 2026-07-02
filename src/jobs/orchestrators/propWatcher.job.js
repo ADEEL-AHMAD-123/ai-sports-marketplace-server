@@ -100,7 +100,7 @@ const registerPropWatcherJob = () => {
   });
 };
 
-module.exports = { registerPropWatcherJob, runPropWatcher };
+module.exports = { registerPropWatcherJob, runPropWatcher, runPropWatcherWithLock };
 
 if (require.main === module) {
   const connectDB = require('../../config/database');

@@ -305,13 +305,20 @@ function buildPlatoonBlock(matchup) {
     strong_against: 'UNFAVORABLE (' + Math.round((delta || 0) * 1000) + ' pts) → lean UNDER on hits/TB',
   }[advantage] || 'neutral';
 
-  const abNote   = matchupABs ? ` (${matchupABs} AB sample)` : '';
-  const oppNote  = oppositeAvg ? ` | vs opposite hand: .${String(oppositeAvg).replace('.', '').padStart(3, '0')}` : '';
+  // Format a 0.NNN batting average as ".NNN" (drop leading zero). The old
+  // `String(avg).replace('.', '')` approach produced ".0162" for 0.162 —
+  // padStart preserved the leading zero and the value was already 4 chars.
+  const fmtAvg = (v) => {
+    if (v == null || Number.isNaN(v)) return '';
+    return Number(v).toFixed(3).replace(/^0/, ''); // 0.162 → ".162"
+  };
+  const abNote  = matchupABs ? ` (${matchupABs} AB sample)` : '';
+  const oppNote = oppositeAvg ? ` | vs opposite hand: ${fmtAvg(oppositeAvg)}` : '';
 
   return [
     `PLATOON MATCHUP: ${matchupLabel}`,
     `  ${leanEmoji} ${leanStr}`,
-    `  Batter avg vs this pitcher hand: .${String(matchupAvg).replace('.', '').padStart(3, '0')}${abNote}${oppNote}`,
+    `  Batter avg vs this pitcher hand: ${fmtAvg(matchupAvg)}${abNote}${oppNote}`,
     matchup.typicalLabel ? `  Context: ${matchup.typicalLabel}` : '',
     '  Platoon splits are highly consistent — factor into hits/TB/OBP props.',
   ].filter(Boolean).join('\n');

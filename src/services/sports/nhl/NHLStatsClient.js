@@ -203,7 +203,7 @@ async function _get(path) {
       const res = await axios.get(url, {
         timeout: TIMEOUT_MS,
         headers: {
-          'User-Agent':      'Mozilla/5.0 (compatible; SignalDraft/1.0)',
+          'User-Agent':      'Mozilla/5.0 (compatible; EdgeAI/1.0)',
           'Accept':          'application/json',
           'Accept-Language': 'en-US,en;q=0.9',
           'Referer':         'https://www.nhl.com/',

@@ -156,10 +156,31 @@ async function fetchStarterStats(pitcherName) {
  * @param {Object} PlayerProp   - Mongoose model for bulk updates
  */
 async function enrichBatterPropsWithStarter(game, rawProps, PlayerProp) {
-  const { homeStarter, awayStarter, bothKnown } = inferStartersFromProps(game, rawProps);
+  // First try: infer from this cycle's raw fetch.
+  let inferred = inferStartersFromProps(game, rawProps);
+
+  // Fallback: if pitcher K props weren't in this cycle (books post them
+  // later than batter markets), look them up from previously-persisted
+  // props for this game. Enrichment then works across cycles.
+  if (!inferred.homeStarter && !inferred.awayStarter) {
+    const dbPitchers = await PlayerProp.find({
+      sport:       'mlb',
+      oddsEventId: game.oddsEventId,
+      statType:    'pitcher_strikeouts',
+      isAvailable: true,
+    }).select('playerName').lean();
+    if (dbPitchers.length) {
+      inferred = inferStartersFromProps(
+        game,
+        dbPitchers.map((p) => ({ statType: 'pitcher_strikeouts', playerName: p.playerName })),
+      );
+    }
+  }
+
+  const { homeStarter, awayStarter, bothKnown } = inferred;
 
   if (!homeStarter && !awayStarter) {
-    logger.debug('[MLBStarterService] No starters found for game', {
+    logger.debug('[MLBStarterService] No starters found for game (raw or DB)', {
       home: game.homeTeam?.name,
       away: game.awayTeam?.name,
     });

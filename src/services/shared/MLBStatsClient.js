@@ -213,23 +213,80 @@ class MLBStatsClient {
   // ─── Person details (for platoon service) ────────────────────────────────
 
   /**
-   * Get person details including pitchHand and batSide.
-   * Used by MLBPlatoonService to get pitcher throwing hand and batter batting side.
+   * Get person details including pitchHand, batSide, and currentTeam.
+   * Used by MLBPlatoonService (hand) and MLBInsightPipeline (team → playerSide).
+   *
+   * currentTeam.name is used to determine whether a batter is home vs away for
+   * a given game, and to correctly assign home/away pitcher labels.
    *
    * @param {number} mlbamId
-   * @returns {Promise<{ pitchHand: { code: string }, batSide: { code: string } }|null>}
+   * @returns {Promise<{
+   *   pitchHand?:   { code: string },
+   *   batSide?:     { code: string },
+   *   currentTeam?: { id: number, name: string }
+   * }|null>}
    */
   async _getPersonDetails(mlbamId) {
     if (!mlbamId) return null;
     try {
+      // Two important quirks of statsapi.mlb.com/people/{id}:
+      //   1. The `fields` param is a FLAT allowlist of key names — nested
+      //      sub-keys are stripped unless every child name is listed too.
+      //      Using it caused batSide/pitchHand to come back as empty {}
+      //      (batSide.code was invisible), which silently broke platoon +
+      //      starter.hand for months. Drop the projection — the full doc is
+      //      ~1 KB and we cache in memory, so the cost is negligible.
+      //   2. `currentTeam` is NOT returned by default — it must be requested
+      //      via `hydrate=currentTeam`. Without it there's no way to tell
+      //      which team a player is on, which is exactly what the pipeline
+      //      needs to resolve batter side / opposing starter.
       const res = await mlbHttp.get(`/people/${mlbamId}`, {
-        params: { fields: 'people,id,fullName,pitchHand,batSide' },
+        params: { hydrate: 'currentTeam' },
         timeout: 8000,
       });
       return res.data?.people?.[0] || null;
     } catch (err) {
       if (err.response?.status === 404) return null;
       logger.error('[MLBStats] _getPersonDetails failed', { mlbamId, error: err.message });
+      return null;
+    }
+  }
+
+  /**
+   * Resolve a player's current team NAME (e.g. "Baltimore Orioles").
+   *
+   * Uses in-memory caching (permanent per process) — trades are rare enough
+   * that a daily restart handles staleness. Callers should pass names exactly
+   * as they appear on Odds-API props (case-insensitive matching downstream).
+   *
+   * @param {string} playerName
+   * @returns {Promise<string|null>} Team full name or null if unresolvable
+   */
+  async resolvePlayerTeamName(playerName) {
+    if (!playerName) return null;
+    const norm = canonicalName(playerName);
+    const cacheKey = `player:team:${norm}`;
+
+    if (idCache.has(cacheKey)) {
+      const cached = idCache.get(cacheKey);
+      return cached === '__NULL__' ? null : cached;
+    }
+
+    try {
+      const mlbId = await this.findPlayerId(playerName);
+      if (!mlbId) {
+        idCache.set(cacheKey, '__NULL__');
+        return null;
+      }
+      const details = await this._getPersonDetails(mlbId);
+      const teamName = details?.currentTeam?.name || null;
+      idCache.set(cacheKey, teamName || '__NULL__');
+      if (teamName) {
+        logger.debug(`[MLBStats] Player team: "${playerName}" → ${teamName}`);
+      }
+      return teamName;
+    } catch (err) {
+      logger.warn(`[MLBStats] resolvePlayerTeamName failed for "${playerName}"`, { error: err.message });
       return null;
     }
   }
@@ -245,20 +302,45 @@ class MLBStatsClient {
    */
   async _getStatSplits(mlbamId, season, group = 'hitting') {
     if (!mlbamId) return [];
-    try {
+
+    // The `stats=statSplits` endpoint returns an EMPTY array unless the
+    // caller passes `sitCodes` to name which situational splits to include.
+    // For platoon we always want vs-Left and vs-Right.
+    // Codes on the response come back as `vl` and `vr` (which
+    // MLBPlatoonService._extractSplit already looks for).
+    const doFetch = async (yr) => {
       const res = await mlbHttp.get(`/people/${mlbamId}/stats`, {
         params: {
-          stats:  'statSplits',
-          season,
+          stats:    'statSplits',
+          season:   yr,
           group,
-          gameType: 'R',  // Regular season only
+          gameType: 'R',       // Regular season only
+          sitCodes: 'vl,vr',   // ← required, else splits: []
         },
         timeout: 10000,
       });
-      // statSplits returns multiple stat objects — find the one with splits
       const stats = res.data?.stats || [];
       for (const stat of stats) {
         if (stat.splits?.length) return stat.splits;
+      }
+      return [];
+    };
+
+    try {
+      // Try requested season first.
+      const primary = await doFetch(season);
+      if (primary.length) return primary;
+
+      // Early-season / off-season fallback: if the current year has no data
+      // yet (or too little), pull the prior year so platoon still has a
+      // signal. Callers still enforce the 30-AB threshold, so stale data
+      // never overpowers a real current-year split.
+      const prior = season - 1;
+      if (prior >= 2015) {
+        logger.debug('[MLBStats] _getStatSplits: current season empty, falling back', {
+          mlbamId, season, prior,
+        });
+        return await doFetch(prior);
       }
       return [];
     } catch (err) {
