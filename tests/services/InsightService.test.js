@@ -2,7 +2,8 @@
  * InsightService.test.js
  *
  * Tests the most critical business logic:
- *  - Cold cache hit → NO credit deduction
+ *  - Cold cache hit for NEW user → credit IS deducted (each user pays their own)
+ *  - Cold cache hit for SAME user → NO credit deduction (same-user re-unlock is free)
  *  - Pre-flight failure (odds changed) → NO credit deduction
  *  - Pre-flight failure (market closed) → NO credit deduction
  *  - Previously unlocked insight → NO credit deduction
@@ -135,41 +136,66 @@ describe('InsightService', () => {
   // ── CACHE HIT ──────────────────────────────────────────────────────────────
 
   describe('Cold cache hit', () => {
-    it('should return cached insight WITHOUT deducting credits', async () => {
+    it('should return cached insight AND charge NEW user (per-user credit model)', async () => {
       const cachedInsight = {
         _id: 'insight456',
         playerName: 'LeBron James',
         statType: 'points',
         bettingLine: 25.5,
+        sport: 'nba',
         status: INSIGHT_STATUS.GENERATED,
         insightText: 'OVER — cached insight',
       };
 
       // findExisting returns a cached insight
       Insight.findExisting = jest.fn().mockResolvedValue(cachedInsight);
-      // User hasn't unlocked it yet (first visit from cache)
+      // User has NOT unlocked it yet — someone else generated it
       mockUser.hasUnlockedInsight.mockReturnValue(false);
+      mockUser.hasEnoughCredits.mockReturnValue(true);
       User.findByIdAndUpdate = jest.fn().mockResolvedValue({});
       Insight.findByIdAndUpdate = jest.fn().mockResolvedValue({});
+      Transaction.create = jest.fn().mockResolvedValue({});
 
       const result = await InsightService.generateInsight(mockInsightParams);
 
-      expect(result.creditDeducted).toBe(false);
+      // New user pays even on cache hit — each user pays their own credit.
+      expect(result.creditDeducted).toBe(true);
       expect(result.insight).toEqual(cachedInsight);
-      // OpenAI should NOT be called
+      // A ledger row should have been written recording the unlock.
+      expect(Transaction.create).toHaveBeenCalled();
+      // OpenAI should NOT be called (we saved the AI cost, not the credit).
       expect(mockOpenAICreate).not.toHaveBeenCalled();
     });
 
-    it('should return cached insight for free if user already unlocked it', async () => {
-      const cachedInsight = { _id: 'insight456', status: INSIGHT_STATUS.GENERATED };
+    it('should return cached insight for free if SAME user already unlocked it', async () => {
+      const cachedInsight = { _id: 'insight456', sport: 'nba', status: INSIGHT_STATUS.GENERATED };
 
       Insight.findExisting = jest.fn().mockResolvedValue(cachedInsight);
       mockUser.hasUnlockedInsight.mockReturnValue(true); // Already unlocked
+      Transaction.create = jest.fn().mockResolvedValue({});
 
       const result = await InsightService.generateInsight(mockInsightParams);
 
+      // Same user re-unlock is free — no ledger row written.
       expect(result.creditDeducted).toBe(false);
+      expect(Transaction.create).not.toHaveBeenCalled();
       expect(mockOpenAICreate).not.toHaveBeenCalled();
+    });
+
+    it('should refuse the cache hit if NEW user has insufficient credits', async () => {
+      const cachedInsight = { _id: 'insight456', sport: 'nba', status: INSIGHT_STATUS.GENERATED };
+
+      Insight.findExisting = jest.fn().mockResolvedValue(cachedInsight);
+      mockUser.hasUnlockedInsight.mockReturnValue(false);
+      mockUser.hasEnoughCredits.mockReturnValue(false); // broke
+      Transaction.create = jest.fn().mockResolvedValue({});
+
+      const result = await InsightService.generateInsight(mockInsightParams);
+
+      expect(result.insufficientCredits).toBe(true);
+      expect(result.creditDeducted).toBe(false);
+      expect(result.insight).toBeNull();
+      expect(Transaction.create).not.toHaveBeenCalled();
     });
   });
 

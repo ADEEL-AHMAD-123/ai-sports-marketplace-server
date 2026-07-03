@@ -45,6 +45,16 @@ const _handleInsightResult = ({ result, bettingLine, user, res, userId }) => {
       });
     }
 
+    // Cache hit but this user's balance is too low to pay for it.
+    if (result.insufficientCredits) {
+      return res.status(402).json({ // Payment Required
+        success: false,
+        message: result.error || 'Insufficient credits.',
+        creditDeducted: false,
+        insufficientCredits: true,
+      });
+    }
+
     throw new AppError(
       result.error || 'Failed to generate insight. Please try again.',
       HTTP_STATUS.INTERNAL_ERROR
@@ -59,9 +69,16 @@ const _handleInsightResult = ({ result, bettingLine, user, res, userId }) => {
 
   return res.status(HTTP_STATUS.OK).json({
     success: true,
-    message: result.creditDeducted ? 'Insight unlocked!' : 'Insight retrieved from cache',
+    // User-facing wording — no internal terms ("cache", "already generated",
+    // etc.). creditDeducted:false only reaches this response when it's the
+    // same user re-opening their own previously-unlocked insight.
+    message: result.creditDeducted
+      ? 'Insight unlocked!'
+      : 'You already unlocked this one.',
     creditDeducted: result.creditDeducted,
-    remainingCredits: result.creditDeducted ? user.credits - CREDITS.COST_PER_INSIGHT : user.credits,
+    // `user.credits` is already up-to-date in memory (both fresh-generate
+    // and cache-hit charge paths update it via _deductCredit).
+    remainingCredits: user.credits,
     insight: result.insight,
   });
 };
