@@ -153,4 +153,29 @@ const optionalAuth = async (req, res, next) => {
   }
 };
 
-module.exports = { protect, restrictTo, optionalAuth };
+/**
+ * requireVerifiedEmail — blocks the request if the authenticated user
+ * hasn't verified their email address. Must run AFTER `protect`.
+ *
+ * Used on endpoints that spend money or credits so unverified accounts
+ * can't farm free credits, unlock insights, or make purchases with a
+ * throwaway email.
+ */
+const requireVerifiedEmail = (req, res, next) => {
+  if (!req.user) {
+    return res.status(HTTP_STATUS.UNAUTHORIZED).json({
+      success: false,
+      message: 'Authentication required.',
+    });
+  }
+  if (!req.user.isEmailVerified) {
+    return res.status(HTTP_STATUS.FORBIDDEN).json({
+      success: false,
+      code:    'EMAIL_NOT_VERIFIED',
+      message: 'Please verify your email address to continue. Check your inbox for a verification link.',
+    });
+  }
+  next();
+};
+
+module.exports = { protect, restrictTo, optionalAuth, requireVerifiedEmail };

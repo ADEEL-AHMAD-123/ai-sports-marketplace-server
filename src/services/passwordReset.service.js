@@ -23,6 +23,7 @@ const crypto = require('crypto');
 const User = require('../models/User.model');
 const { HTTP_STATUS } = require('../config/constants');
 const { AppError } = require('../middleware/errorHandler.middleware');
+const EmailService = require('./email/EmailService');
 const logger = require('../config/logger');
 
 /**
@@ -164,25 +165,7 @@ const resetPassword = async (req, res, next) => {
  */
 const sendResetEmail = async ({ email, name, rawToken }) => {
   const resetUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/reset-password?token=${rawToken}`;
-
-  // ── STUB — replace with real email sending ──────────────────────────────
-  logger.info('[PasswordReset] EMAIL STUB — would send reset email', {
-    to: email,
-    resetUrl,
-    // In production, never log the raw token
-  });
-
-  // Example with Resend (install: npm install resend):
-  // const { Resend } = require('resend');
-  // const resend = new Resend(process.env.RESEND_API_KEY);
-  // await resend.emails.send({
-  //   from: 'noreply@yourapp.com',
-  //   to: email,
-  //   subject: 'Reset your password',
-  //   html: `<p>Hi ${name},</p>
-  //          <p>Click the link below to reset your password. It expires in 1 hour.</p>
-  //          <a href="${resetUrl}">Reset Password</a>`,
-  // });
+  await EmailService.sendPasswordReset({ to: email, name, resetUrl });
 };
 
 module.exports = { forgotPassword, resetPassword };

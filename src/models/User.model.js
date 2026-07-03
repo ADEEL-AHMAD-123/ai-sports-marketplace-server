@@ -75,12 +75,32 @@ const userSchema = new mongoose.Schema(
     passwordResetToken: String,
     passwordResetExpires: Date,
 
+    // ── Email verification ────────────────────────────────────────────────────
+    // Hashed token — raw token goes in the verify-email link. Same
+    // pattern as passwordResetToken.
+    emailVerificationToken: String,
+    emailVerificationExpires: Date,
+    // Track when we last sent a verification email so we can rate-limit
+    // "resend" requests.
+    emailVerificationLastSentAt: Date,
+
     // ── Stripe customer ID ────────────────────────────────────────────────────
     // Stored so we can look up the user in Stripe for refunds / history
     stripeCustomerId: {
       type: String,
       index: true,
     },
+
+    // ── Chargeback flag ───────────────────────────────────────────────────────
+    // Set when Stripe fires charge.dispute.created. Blocks new purchases and
+    // flags for admin review. Cleared manually after resolution.
+    chargebackFlag: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
+    chargebackFlaggedAt: Date,
+    chargebackReason: String,
 
     // ── Timestamps ────────────────────────────────────────────────────────────
     lastLoginAt: Date,
@@ -153,6 +173,7 @@ userSchema.methods.toPublicJSON = function () {
     role: this.role,
     credits: this.credits,
     isEmailVerified: this.isEmailVerified,
+    chargebackFlag: this.chargebackFlag,
     createdAt: this.createdAt,
   };
 };

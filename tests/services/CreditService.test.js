@@ -10,6 +10,7 @@
 const CreditService = require('../../src/services/CreditService');
 const User = require('../../src/models/User.model');
 const Transaction = require('../../src/models/Transaction.model');
+const { CREDIT_PACKS } = require('../../src/config/constants');
 
 jest.mock('../../src/models/User.model');
 jest.mock('../../src/models/Transaction.model');
@@ -20,6 +21,16 @@ jest.mock('stripe', () => {
       sessions: {
         create: jest.fn().mockResolvedValue({ url: 'https://checkout.stripe.com/test', id: 'cs_test' }),
       },
+    },
+    paymentIntents: {
+      retrieve: jest.fn().mockResolvedValue({ latest_charge: 'ch_test' }),
+    },
+    refunds: {
+      list:   jest.fn().mockResolvedValue({ data: [] }),
+      create: jest.fn().mockResolvedValue({ id: 're_test' }),
+    },
+    billingPortal: {
+      sessions: { create: jest.fn().mockResolvedValue({ url: 'https://billing.stripe.com/portal' }) },
     },
   }));
 });
@@ -34,6 +45,10 @@ describe('CreditService', () => {
 
   describe('handleStripeWebhook()', () => {
 
+    // The starter pack is always defined in CREDIT_PACKS (even without env
+    // vars set — env vars set the priceId, not the id/credits/amount).
+    const starterPack = CREDIT_PACKS.find((p) => p.id === 'pack_starter');
+
     const buildCheckoutEvent = (overrides = {}) => ({
       type: 'checkout.session.completed',
       id: 'evt_test123',
@@ -41,11 +56,13 @@ describe('CreditService', () => {
         object: {
           id: 'cs_test_session',
           payment_intent: 'pi_test',
-          amount_total: 99, // cents
+          // amount_total must match the server-side pack amount, otherwise
+          // the hardened service refuses to grant credits (amount tampering
+          // protection).
+          amount_total: Math.round(starterPack.amount * 100),
           metadata: {
             userId: 'user123',
-            credits: '1',
-            priceId: 'price_test',
+            packId: 'pack_starter',
             ...overrides.metadata,
           },
           ...overrides.session,
@@ -63,45 +80,49 @@ describe('CreditService', () => {
 
       expect(User.findByIdAndUpdate).toHaveBeenCalledWith(
         'user123',
-        { $inc: { credits: 1 } }
+        { $inc: { credits: starterPack.credits } }
       );
       expect(Transaction.create).toHaveBeenCalled();
     });
 
     it('should NOT grant credits if session was already processed (idempotency)', async () => {
-      Transaction.isStripeSessionProcessed = jest.fn().mockResolvedValue(true); // Already done
+      Transaction.isStripeSessionProcessed = jest.fn().mockResolvedValue(true);
 
       await CreditService.handleStripeWebhook(buildCheckoutEvent());
 
-      // Should NOT update user credits
       expect(User.findByIdAndUpdate).not.toHaveBeenCalled();
       expect(Transaction.create).not.toHaveBeenCalled();
     });
 
     it('should NOT grant credits if userId is missing from metadata', async () => {
       Transaction.isStripeSessionProcessed = jest.fn().mockResolvedValue(false);
-
-      const event = buildCheckoutEvent({ metadata: { userId: '', credits: '1', priceId: 'price_test' } });
+      const event = buildCheckoutEvent({ metadata: { userId: '', packId: 'pack_starter' } });
       await CreditService.handleStripeWebhook(event);
-
       expect(User.findByIdAndUpdate).not.toHaveBeenCalled();
     });
 
-    it('should NOT grant credits if credits value is invalid', async () => {
+    it('should NOT grant credits if packId is unknown (client tampering)', async () => {
       Transaction.isStripeSessionProcessed = jest.fn().mockResolvedValue(false);
-
-      const event = buildCheckoutEvent({ metadata: { userId: 'user123', credits: 'abc', priceId: 'price_test' } });
+      const event = buildCheckoutEvent({ metadata: { userId: 'user123', packId: 'pack_nonexistent' } });
       await CreditService.handleStripeWebhook(event);
+      expect(User.findByIdAndUpdate).not.toHaveBeenCalled();
+    });
 
+    it('should NOT grant credits if amount_total does not match the pack price', async () => {
+      Transaction.isStripeSessionProcessed = jest.fn().mockResolvedValue(false);
+      // Simulate a checkout that only charged half the expected amount —
+      // the server should refuse to hand out the pack's credits.
+      const event = buildCheckoutEvent({
+        session: { amount_total: Math.round(starterPack.amount * 100) - 100 },
+      });
+      await CreditService.handleStripeWebhook(event);
       expect(User.findByIdAndUpdate).not.toHaveBeenCalled();
     });
 
     it('should NOT grant credits if user not found', async () => {
       Transaction.isStripeSessionProcessed = jest.fn().mockResolvedValue(false);
-      User.findById = jest.fn().mockResolvedValue(null); // User deleted
-
+      User.findById = jest.fn().mockResolvedValue(null);
       await CreditService.handleStripeWebhook(buildCheckoutEvent());
-
       expect(User.findByIdAndUpdate).not.toHaveBeenCalled();
     });
 

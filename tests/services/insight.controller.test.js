@@ -27,6 +27,9 @@ describe('Insight Controller', () => {
       _id: 'user123',
       credits: 3,
       isActive: true,
+      // Verified email required for spending endpoints since the
+      // Mailtrap integration landed. Test users are treated as verified.
+      isEmailVerified: true,
       hasUnlockedInsight: jest.fn().mockReturnValue(false),
       hasEnoughCredits: jest.fn().mockReturnValue(true),
     };

@@ -9,7 +9,7 @@
 const express = require('express');
 const router = express.Router();
 const insightController = require('../controllers/insight.controller');
-const { protect } = require('../middleware/auth.middleware');
+const { protect, requireVerifiedEmail } = require('../middleware/auth.middleware');
 const {
   validateInsightRequest,
   validatePagination,
@@ -24,8 +24,10 @@ router.get('/featured-recent', insightController.getFeaturedRecent);
 // All other insight routes require authentication
 router.use(protect);
 
-// POST /api/insights/unlock — Unlock a new insight (deducts 1 credit)
-router.post('/unlock', validateInsightRequest, insightController.unlockInsight);
+// POST /api/insights/unlock — Unlock a new insight (deducts 1 credit).
+// Requires verified email so throwaway accounts can't drain the model
+// with fake addresses.
+router.post('/unlock', requireVerifiedEmail, validateInsightRequest, insightController.unlockInsight);
 
 // GET /api/insights/unlock-jobs/:jobId — Poll queue-backed unlock status
 router.get('/unlock-jobs/:jobId', insightController.getUnlockJobStatus);

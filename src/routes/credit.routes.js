@@ -1,27 +1,44 @@
 /**
- * credit.routes.js — Credit wallet and Stripe payment routes
+ * credit.routes.js — Credit wallet + Stripe endpoints
  *
- * ⚠️  IMPORTANT: The /webhook route MUST use raw body parsing.
- *     It is registered BEFORE express.json() in app.js.
- *     See app.js for the special raw body setup.
+ * ⚠️ /webhook uses raw body — must be registered BEFORE express.json().
+ *    See app.js.
+ *
+ * Payment-related endpoints have their own rate limits — attackers who
+ * grab a stolen JWT shouldn't be able to hammer Stripe checkout creation
+ * or refund requests.
  */
-const express = require('express');
-const router = express.Router();
-const creditController = require('../controllers/credit.controller');
-const { protect } = require('../middleware/auth.middleware');
+const express   = require('express');
+const rateLimit = require('express-rate-limit');
+const router    = express.Router();
+const c         = require('../controllers/credit.controller');
+const { protect, requireVerifiedEmail } = require('../middleware/auth.middleware');
 const { validateCreditPurchase, validatePagination } = require('../middleware/validate.middleware');
 
-// ── Stripe Webhook — PUBLIC (Stripe calls this, not the user) ─────────────────
-// Raw body required for Stripe signature verification — handled in app.js
-// This route is intentionally BEFORE the protect middleware
-router.post('/webhook', creditController.stripeWebhook);
+// Tight per-user limits on payment-mutating endpoints. Keyed by user ID
+// so multiple users on the same NAT don't share a bucket.
+const paymentLimiter = rateLimit({
+  windowMs: 60 * 1000,     // 1 minute
+  max: 10,                 // 10 checkout / refund requests per minute per user
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => req.user?._id?.toString() || req.ip,
+  message: { success: false, message: 'Too many payment requests — please wait a moment.' },
+});
 
-// ── All other credit routes require authentication ────────────────────────────
+// Stripe → us. Public. Signature is the only auth.
+router.post('/webhook', c.stripeWebhook);
+
+// Everything else requires an authenticated user.
 router.use(protect);
 
-router.get('/balance',           creditController.getBalance);
-router.get('/packs',             creditController.getCreditPacks);
-router.post('/checkout',         validateCreditPurchase, creditController.createCheckout);
-router.get('/transactions',      validatePagination, creditController.getTransactions);
+router.get ('/balance',       c.getBalance);
+router.get ('/packs',         c.getCreditPacks);
+router.get ('/summary',       c.getSummary);
+router.get ('/transactions',  validatePagination, c.getTransactions);
+
+router.post('/checkout',      paymentLimiter, requireVerifiedEmail, validateCreditPurchase, c.createCheckout);
+router.post('/portal',        paymentLimiter, c.createPortal);
+router.post('/refund/:txId',  paymentLimiter, c.requestRefund);
 
 module.exports = router;

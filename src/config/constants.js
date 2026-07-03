@@ -39,9 +39,70 @@ const CREDITS = {
   COST_PER_INSIGHT: parseInt(process.env.CREDITS_PER_INSIGHT    || '1', 10),
 };
 
+/**
+ * Credit packs — presented in the /pricing page and used to look up
+ * server-side truth when a Stripe checkout completes.
+ *
+ * IMPORTANT: `amount` is the EXPECTED total in USD dollars (Stripe returns
+ * cents in webhooks — we convert). If a completed checkout's amount_total
+ * doesn't match one of these packs by priceId, we refuse to grant credits.
+ * This protects against a client tampering with priceId to a cheaper pack.
+ *
+ * `perCredit` and `save` are derived, used for UI badges ("best value",
+ * "save 40%") on the pricing page.
+ */
 const CREDIT_PACKS = [
-  { id: 'pack_1',  priceId: process.env.STRIPE_PRICE_1_CREDIT,  credits: 1, amount: 0.99, label: '1 Credit — $0.99'  },
-  { id: 'pack_6',  priceId: process.env.STRIPE_PRICE_6_CREDITS, credits: 6, amount: 4.99, label: '6 Credits — $4.99' },
+  {
+    id: 'pack_starter',
+    priceId: process.env.STRIPE_PRICE_STARTER,
+    credits: 3,
+    amount: 2.99,
+    label: 'Starter',
+    perCredit: 1.00,
+    save: 0,
+    description: 'Try a few picks',
+  },
+  {
+    id: 'pack_10',
+    priceId: process.env.STRIPE_PRICE_10,
+    credits: 10,
+    amount: 8.99,
+    label: '10 Credits',
+    perCredit: 0.90,
+    save: 10,
+    description: 'A weekend slate',
+  },
+  {
+    id: 'pack_25',
+    priceId: process.env.STRIPE_PRICE_25,
+    credits: 25,
+    amount: 19.99,
+    label: '25 Credits',
+    perCredit: 0.80,
+    save: 20,
+    description: 'Most popular',
+    highlight: true,
+  },
+  {
+    id: 'pack_60',
+    priceId: process.env.STRIPE_PRICE_60,
+    credits: 60,
+    amount: 39.99,
+    label: '60 Credits',
+    perCredit: 0.67,
+    save: 33,
+    description: 'Best value',
+  },
+  {
+    id: 'pack_150',
+    priceId: process.env.STRIPE_PRICE_150,
+    credits: 150,
+    amount: 79.99,
+    label: '150 Credits',
+    perCredit: 0.53,
+    save: 47,
+    description: 'For power users',
+  },
 ];
 
 // ─── Cache TTL (seconds) ───────────────────────────────────────────────────────
@@ -104,8 +165,19 @@ const TRANSACTION_TYPES = {
   PURCHASE:       'purchase',
   INSIGHT_UNLOCK: 'insight_unlock',
   REFUND:         'refund',
+  CHARGEBACK:     'chargeback',    // Stripe dispute filed by customer
   ADMIN_GRANT:    'admin_grant',
+  ADMIN_DEDUCT:   'admin_deduct',
 };
+
+// ─── Payment safety ────────────────────────────────────────────────────────────
+// Self-serve refund window — after this many hours, refunds go to admin queue.
+const REFUND_SELF_SERVE_WINDOW_HOURS = parseInt(
+  process.env.REFUND_SELF_SERVE_WINDOW_HOURS || '2', 10,
+);
+// If a user unlocks any insight within this many minutes of a refund request,
+// self-serve is denied to prevent "unlock then refund" gaming.
+const REFUND_SELF_SERVE_UNLOCK_LOCKOUT_MINUTES = 30;
 
 // ─── HTTP status codes ─────────────────────────────────────────────────────────
 const HTTP_STATUS = {
@@ -130,4 +202,5 @@ module.exports = {
   // Backward compat aliases
   CONFIDENCE_WINDOW, MIN_CONFIDENCE_HITS, MIN_EDGE_PERCENTAGE,
   USER_ROLES, TRANSACTION_TYPES, HTTP_STATUS, AI_PROMPT,
+  REFUND_SELF_SERVE_WINDOW_HOURS, REFUND_SELF_SERVE_UNLOCK_LOCKOUT_MINUTES,
 };
