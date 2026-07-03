@@ -66,6 +66,39 @@ const _getClient = (mode) => {
 // spoof a different sender.
 const FROM = { email: MAIL_FROM_EMAIL, name: MAIL_FROM_NAME };
 
+// Reply-To — where a customer's reply lands. Never MAIL_FROM_EMAIL if
+// that's a noreply address; direct to support instead.
+const REPLY_TO = process.env.MAIL_SUPPORT_EMAIL || MAIL_FROM_EMAIL;
+
+/**
+ * Build the deliverability headers Gmail / Outlook / Yahoo look for on
+ * transactional email. Without these, mail from a new domain gets the
+ * "this looks suspicious" banner even when the content is clean.
+ *
+ * - `List-Unsubscribe` + `-Post` — RFC 8058 one-click unsubscribe.
+ *   Gmail's 2024 sender requirements make this near-mandatory for any
+ *   bulk-shaped sender. Even purely transactional email benefits.
+ * - `Auto-Submitted: auto-generated` — RFC 3834 marker that says
+ *   "this is a machine-sent transactional message, don't reply-to-all
+ *   or bounce-loop." Suppresses out-of-office auto-replies.
+ * - `X-Entity-Ref-ID` — cross-references our internal category so we
+ *   can find deliverability issues by type in Postmaster Tools.
+ * - `Feedback-ID` — Gmail Postmaster Tools tracker format:
+ *   `<campaign>:<customer>:<mailer-id>:<sender-id>`. Lets us monitor
+ *   per-category spam rates in Postmaster once the domain qualifies
+ *   (>~5k emails/day). Harmless below that threshold.
+ */
+const buildDeliverabilityHeaders = ({ category, to }) => {
+  const unsubMailto = `mailto:${REPLY_TO}?subject=unsubscribe`;
+  return {
+    'List-Unsubscribe':      `<${unsubMailto}>`,
+    'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
+    'Auto-Submitted':        'auto-generated',
+    'X-Entity-Ref-ID':       category || 'transactional',
+    'Feedback-ID':           `${category || 'txn'}:edgeai:mailer:edgeai-prod`,
+  };
+};
+
 /**
  * Send an email. Never throws — always resolves with a result object.
  *
@@ -95,12 +128,14 @@ async function send({ to, subject, html, text, category }) {
     try {
       const client = _getClient(mode);
       const res = await client.send({
-        from: FROM,
-        to:   [{ email: to }],
+        from:      FROM,
+        reply_to:  { email: REPLY_TO, name: MAIL_FROM_NAME },
+        to:        [{ email: to }],
         subject,
         html,
         text,
-        category, // Mailtrap tag — categorises in dashboard analytics
+        category,           // Mailtrap dashboard tag
+        headers: buildDeliverabilityHeaders({ category, to }),
       });
       results.push({ mode, ok: true, messageIds: res?.message_ids });
       logger.info('📧 [Email] Sent', { mode, to, subject, category });

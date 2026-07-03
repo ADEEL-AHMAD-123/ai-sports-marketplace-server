@@ -14,12 +14,40 @@ const BRAND = {
   name:       'EdgeAI',
   url:        process.env.FRONTEND_URL || 'https://edgeai.bet',
   supportEmail: process.env.MAIL_SUPPORT_EMAIL || 'support@edgeai.bet',
+  // Support phone — optional. Only rendered if MAIL_SUPPORT_PHONE is set.
+  // Format however you want in the env var; we'll strip whitespace for
+  // the tel: link automatically.
+  supportPhone: process.env.MAIL_SUPPORT_PHONE || '',
+  // Physical mailing address — required by CAN-SPAM (US) and helpful
+  // for Gmail's deliverability heuristics. If MAIL_POSTAL_ADDRESS isn't
+  // set, we omit the line rather than lie about a fake address.
+  postalAddress: process.env.MAIL_POSTAL_ADDRESS || '',
   color:      '#22c55e',
   darkBg:     '#0f1418',
   lightBg:    '#f8fafc',
   textPrim:   '#0f172a',
   textSub:    '#475569',
   textMuted:  '#94a3b8',
+};
+
+// Strip non-digits (except leading +) for a tel: link. "(415) 555-0123"
+// becomes "+14155550123" which is what phones actually need to dial.
+const telHref = (raw) => {
+  if (!raw) return '';
+  return String(raw).replace(/(?!^\+)[^\d]/g, '');
+};
+
+// Plain-text contact block, appended to every template's `text` output
+// so plain-text mail clients (and screen readers) see the same contact
+// info as HTML clients.
+const textFooter = () => {
+  const lines = ['', '— Contact —', `Email: ${BRAND.supportEmail}`];
+  if (BRAND.supportPhone)  lines.push(`Phone: ${BRAND.supportPhone}`);
+  lines.push(`Web:   ${BRAND.url}`);
+  if (BRAND.postalAddress) lines.push('', BRAND.postalAddress);
+  lines.push('', 'You received this email because an EdgeAI account was created with this address.');
+  lines.push(`Unsubscribe: mailto:${BRAND.supportEmail}?subject=unsubscribe`);
+  return lines.join('\n');
 };
 
 const escapeHtml = (s) => String(s || '')
@@ -107,11 +135,29 @@ const _shell = ({ preview, heading, bodyHtml, ctaLabel, ctaUrl, footerNote }) =>
         </tr>
         ` : ''}
 
-        <!-- Footer -->
+        <!-- Footer — real contact info + minimum required legal fields.
+             Structured so email clients render the contact block cleanly
+             and Gmail's classifier sees a legitimate transactional
+             sender pattern (short, has physical address, clear reason
+             for sending, one-click unsubscribe). -->
         <tr>
-          <td style="padding:32px;border-top:1px solid #e5e7eb;font-size:11px;color:${BRAND.textMuted};line-height:1.5;">
-            <p style="margin:0 0 6px;">${BRAND.name} — AI-powered scouting to help you make more informed picks.</p>
-            <p style="margin:0;">Questions? <a href="mailto:${BRAND.supportEmail}" style="color:${BRAND.textSub};">Reply to this email</a> or visit <a href="${BRAND.url}" style="color:${BRAND.textSub};">${BRAND.url.replace(/^https?:\/\//, '')}</a>.</p>
+          <td style="padding:22px 32px 26px;border-top:1px solid #e5e7eb;font-size:11px;color:${BRAND.textMuted};line-height:1.55;">
+
+            <!-- Contact block — visually distinct so it reads as "how to
+                 reach us" rather than legalese. -->
+            <p style="margin:0 0 6px;font-weight:500;color:${BRAND.textSub};">Contact ${BRAND.name}</p>
+            <p style="margin:0 0 4px;">
+              Email <a href="mailto:${BRAND.supportEmail}" style="color:${BRAND.textSub};text-decoration:none;">${escapeHtml(BRAND.supportEmail)}</a>
+              ${BRAND.supportPhone ? `<br>Phone <a href="tel:${telHref(BRAND.supportPhone)}" style="color:${BRAND.textSub};text-decoration:none;">${escapeHtml(BRAND.supportPhone)}</a>` : ''}
+              <br>Web <a href="${BRAND.url}" style="color:${BRAND.textSub};text-decoration:none;">${BRAND.url.replace(/^https?:\/\//, '')}</a>
+            </p>
+
+            ${BRAND.postalAddress ? `<p style="margin:12px 0 0;">${escapeHtml(BRAND.postalAddress)}</p>` : ''}
+
+            <p style="margin:14px 0 6px;">You received this email because an EdgeAI account was created with this address.</p>
+            <p style="margin:0;">
+              <a href="mailto:${BRAND.supportEmail}?subject=unsubscribe" style="color:${BRAND.textSub};">Unsubscribe</a>
+            </p>
           </td>
         </tr>
       </table>
@@ -150,6 +196,7 @@ const verifyEmail = ({ name, verifyUrl }) => ({
     "Didn't sign up? You can safely ignore this email.",
     '',
     '— EdgeAI',
+    textFooter(),
   ].join('\n'),
 });
 
@@ -179,6 +226,7 @@ const welcome = ({ name, credits }) => ({
     'Bet responsibly — verify current lines at your book and only stake what you can afford to lose.',
     '',
     '— EdgeAI',
+    textFooter(),
   ].join('\n'),
 });
 
@@ -207,6 +255,7 @@ const passwordReset = ({ name, resetUrl }) => ({
     "Didn't request this? You can safely ignore this email.",
     '',
     '— EdgeAI',
+    textFooter(),
   ].join('\n'),
 });
 
@@ -258,6 +307,7 @@ const purchaseReceipt = ({ name, packLabel, credits, amountUSD, newBalance, sess
     'Need a refund within 2 hours? Self-serve from your wallet. After that, reply here.',
     '',
     '— EdgeAI',
+    textFooter(),
   ].join('\n'),
 });
 
@@ -285,6 +335,7 @@ const refundConfirmation = ({ name, amountUSD, creditsReversed, refundId }) => (
     `Refund reference: ${refundId || ''}`,
     '',
     '— EdgeAI',
+    textFooter(),
   ].join('\n'),
 });
 
