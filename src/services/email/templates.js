@@ -18,10 +18,6 @@ const BRAND = {
   // Format however you want in the env var; we'll strip whitespace for
   // the tel: link automatically.
   supportPhone: process.env.MAIL_SUPPORT_PHONE || '',
-  // Physical mailing address — required by CAN-SPAM (US) and helpful
-  // for Gmail's deliverability heuristics. If MAIL_POSTAL_ADDRESS isn't
-  // set, we omit the line rather than lie about a fake address.
-  postalAddress: process.env.MAIL_POSTAL_ADDRESS || '',
   color:      '#22c55e',
   darkBg:     '#0f1418',
   lightBg:    '#f8fafc',
@@ -44,7 +40,6 @@ const textFooter = () => {
   const lines = ['', '— Contact —', `Email: ${BRAND.supportEmail}`];
   if (BRAND.supportPhone)  lines.push(`Phone: ${BRAND.supportPhone}`);
   lines.push(`Web:   ${BRAND.url}`);
-  if (BRAND.postalAddress) lines.push('', BRAND.postalAddress);
   lines.push('', 'You received this email because an EdgeAI account was created with this address.');
   lines.push(`Unsubscribe: mailto:${BRAND.supportEmail}?subject=unsubscribe`);
   return lines.join('\n');
@@ -152,8 +147,6 @@ const _shell = ({ preview, heading, bodyHtml, ctaLabel, ctaUrl, footerNote }) =>
               <br>Web <a href="${BRAND.url}" style="color:${BRAND.textSub};text-decoration:none;">${BRAND.url.replace(/^https?:\/\//, '')}</a>
             </p>
 
-            ${BRAND.postalAddress ? `<p style="margin:12px 0 0;">${escapeHtml(BRAND.postalAddress)}</p>` : ''}
-
             <p style="margin:14px 0 6px;">You received this email because an EdgeAI account was created with this address.</p>
             <p style="margin:0;">
               <a href="mailto:${BRAND.supportEmail}?subject=unsubscribe" style="color:${BRAND.textSub};">Unsubscribe</a>
@@ -260,84 +253,261 @@ const passwordReset = ({ name, resetUrl }) => ({
 });
 
 /**
- * Receipt after successful purchase.
+ * Purchase invoice — designed to look like the formal receipts big SaaS
+ * companies send (Stripe, Vercel, Linear, GitHub).
+ *
+ * Structure:
+ *   1. Invoice number + issue date + big green PAID stamp.
+ *   2. Billed to (customer) / From (EdgeAI + address).
+ *   3. Itemized line-item table.
+ *   4. Subtotal / tax / total block.
+ *   5. Payment method (card brand + last4).
+ *   6. Credits added + new wallet balance.
+ *   7. CTA: view full invoice on Stripe / download PDF.
+ *
+ * All new fields fall back gracefully — the older single-arg call
+ * signature that CreditService used before this refactor still works.
  */
-const purchaseReceipt = ({ name, packLabel, credits, amountUSD, newBalance, sessionId }) => ({
-  subject: `Receipt: ${credits} credits added to your EdgeAI wallet`,
-  html: _shell({
-    preview:  `${credits} credits added. New balance: ${newBalance}.`,
-    heading:  'Payment received.',
-    bodyHtml: `
-      <p style="margin:0 0 14px;">Thanks for supporting EdgeAI, ${escapeHtml(name)}.</p>
-      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:14px 0;border-collapse:collapse;">
-        <tr>
-          <td style="padding:8px 12px;background:${BRAND.lightBg};border-radius:8px 8px 0 0;font-size:13px;color:${BRAND.textMuted};">Order</td>
-          <td style="padding:8px 12px;background:${BRAND.lightBg};border-radius:8px 8px 0 0;font-size:13px;color:${BRAND.textPrim};text-align:right;font-weight:500;">${escapeHtml(packLabel)}</td>
-        </tr>
-        <tr>
-          <td style="padding:8px 12px;background:${BRAND.lightBg};font-size:13px;color:${BRAND.textMuted};">Credits added</td>
-          <td style="padding:8px 12px;background:${BRAND.lightBg};font-size:13px;color:${BRAND.textPrim};text-align:right;font-weight:500;">+${credits}</td>
-        </tr>
-        <tr>
-          <td style="padding:8px 12px;background:${BRAND.lightBg};font-size:13px;color:${BRAND.textMuted};">Amount</td>
-          <td style="padding:8px 12px;background:${BRAND.lightBg};font-size:13px;color:${BRAND.textPrim};text-align:right;font-weight:500;">$${Number(amountUSD).toFixed(2)} USD</td>
-        </tr>
-        <tr>
-          <td style="padding:8px 12px;background:${BRAND.lightBg};border-radius:0 0 8px 8px;font-size:13px;color:${BRAND.textMuted};">New balance</td>
-          <td style="padding:8px 12px;background:${BRAND.lightBg};border-radius:0 0 8px 8px;font-size:13px;color:${BRAND.color};text-align:right;font-weight:600;">${newBalance} credits</td>
-        </tr>
-      </table>
-      <p style="margin:0;font-size:12px;color:${BRAND.textMuted};">Reference: ${escapeHtml((sessionId || '').slice(-16))}</p>
-    `,
-    ctaLabel: 'Open EdgeAI',
-    ctaUrl:   BRAND.url,
-    footerNote: `Need a refund? Within 2 hours of purchase, self-serve from your wallet. After that, reply to this email and we'll help.`,
-  }),
-  text: [
-    `Thanks for supporting EdgeAI, ${name}.`,
-    '',
-    `Order:         ${packLabel}`,
-    `Credits added: +${credits}`,
-    `Amount:        $${Number(amountUSD).toFixed(2)} USD`,
-    `New balance:   ${newBalance} credits`,
-    `Reference:     ${(sessionId || '').slice(-16)}`,
-    '',
-    `Open EdgeAI: ${BRAND.url}`,
-    '',
-    'Need a refund within 2 hours? Self-serve from your wallet. After that, reply here.',
-    '',
-    '— EdgeAI',
-    textFooter(),
-  ].join('\n'),
-});
+const purchaseReceipt = ({
+  name, packLabel, credits, perCreditUSD,
+  subtotalUSD, taxUSD, amountUSD, newBalance,
+  cardBrand, cardLast4,
+  invoiceNumber, invoicePdfUrl, invoiceHostedUrl, invoiceDate,
+  sessionId,
+}) => {
+  const $ = (v) => `$${Number(v || 0).toFixed(2)}`;
+  const dateStr = (invoiceDate ? new Date(invoiceDate) : new Date())
+    .toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+
+  const brandTitle = cardBrand ? cardBrand.charAt(0).toUpperCase() + cardBrand.slice(1) : null;
+  const cardLabel  = brandTitle && cardLast4 ? `${brandTitle} ending in ${cardLast4}` : null;
+  const invNumStr  = invoiceNumber || `EA-${(sessionId || '').slice(-8).toUpperCase()}`;
+  const subTotal   = subtotalUSD ?? amountUSD;
+  const unitPrice  = perCreditUSD || (amountUSD && credits ? amountUSD / credits : 0);
+
+  // Reused table cell styles.
+  const cellLabel     = `padding:10px 14px;font-size:13px;color:${BRAND.textMuted};border-bottom:1px solid #e5e7eb;`;
+  const cellValue     = `padding:10px 14px;font-size:13px;color:${BRAND.textPrim};border-bottom:1px solid #e5e7eb;text-align:right;font-variant-numeric:tabular-nums;`;
+  const thStyle       = `padding:8px 14px;background:${BRAND.lightBg};font-size:10.5px;color:${BRAND.textMuted};text-transform:uppercase;letter-spacing:0.06em;font-weight:500;text-align:right;`;
+  const thStyleLeft   = thStyle + 'text-align:left;';
+
+  return {
+    subject: `Invoice ${invNumStr} — EdgeAI (${$(amountUSD)})`,
+    html: _shell({
+      preview: `Receipt for ${credits} credits. ${$(amountUSD)} charged to ${cardLabel || 'your card'}. New balance: ${newBalance} credits.`,
+      heading: 'Invoice',
+      bodyHtml: `
+        <!-- Invoice number + date, with PAID stamp on the right. -->
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 20px;">
+          <tr>
+            <td style="font-size:12px;color:${BRAND.textMuted};line-height:1.5;">
+              <span style="color:${BRAND.textSub};font-weight:500;font-variant-numeric:tabular-nums;">${escapeHtml(invNumStr)}</span>
+              <br>Issued ${dateStr}
+            </td>
+            <td style="text-align:right;vertical-align:top;">
+              <span style="display:inline-block;padding:4px 12px;background:${BRAND.color};color:#ffffff;border-radius:4px;font-size:11px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;">Paid</span>
+            </td>
+          </tr>
+        </table>
+
+        <!-- Bill To + From columns -->
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 22px;">
+          <tr>
+            <td width="50%" style="vertical-align:top;padding-right:8px;font-size:12px;color:${BRAND.textMuted};">
+              <p style="margin:0 0 4px;font-weight:500;text-transform:uppercase;letter-spacing:0.06em;color:${BRAND.textSub};font-size:10.5px;">Billed to</p>
+              <p style="margin:0;color:${BRAND.textPrim};font-size:13px;font-weight:500;">${escapeHtml(name)}</p>
+            </td>
+            <td width="50%" style="vertical-align:top;padding-left:8px;font-size:12px;color:${BRAND.textMuted};">
+              <p style="margin:0 0 4px;font-weight:500;text-transform:uppercase;letter-spacing:0.06em;color:${BRAND.textSub};font-size:10.5px;">From</p>
+              <p style="margin:0;color:${BRAND.textPrim};font-size:13px;font-weight:500;">${BRAND.name}</p>
+              <p style="margin:2px 0 0;font-size:11.5px;color:${BRAND.textMuted};">${BRAND.url.replace(/^https?:\/\//, '')}</p>
+            </td>
+          </tr>
+        </table>
+
+        <!-- Itemized line items -->
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;margin:0 0 4px;">
+          <thead>
+            <tr>
+              <th style="${thStyleLeft}border-radius:6px 0 0 0;">Description</th>
+              <th style="${thStyle}">Qty</th>
+              <th style="${thStyle}">Unit</th>
+              <th style="${thStyle}border-radius:0 6px 0 0;">Amount</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td style="padding:14px;font-size:13px;color:${BRAND.textPrim};border-bottom:1px solid #e5e7eb;">
+                <strong style="font-weight:500;">${escapeHtml(packLabel)}</strong>
+                <br><span style="color:${BRAND.textMuted};font-size:12px;">${credits} credits × 1 unlock each</span>
+              </td>
+              <td style="padding:14px;font-size:13px;color:${BRAND.textPrim};border-bottom:1px solid #e5e7eb;text-align:right;font-variant-numeric:tabular-nums;">${credits}</td>
+              <td style="padding:14px;font-size:13px;color:${BRAND.textPrim};border-bottom:1px solid #e5e7eb;text-align:right;font-variant-numeric:tabular-nums;">${$(unitPrice)}</td>
+              <td style="padding:14px;font-size:13px;color:${BRAND.textPrim};border-bottom:1px solid #e5e7eb;text-align:right;font-variant-numeric:tabular-nums;">${$(subTotal)}</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <!-- Totals block, right-aligned. -->
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 22px;">
+          <tr>
+            <td style="width:55%;"></td>
+            <td>
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">
+                <tr>
+                  <td style="${cellLabel}">Subtotal</td>
+                  <td style="${cellValue}">${$(subTotal)}</td>
+                </tr>
+                ${taxUSD > 0 ? `<tr>
+                  <td style="${cellLabel}">Tax</td>
+                  <td style="${cellValue}">${$(taxUSD)}</td>
+                </tr>` : ''}
+                <tr>
+                  <td style="padding:12px 14px;font-size:14px;color:${BRAND.textPrim};font-weight:600;">Total paid</td>
+                  <td style="padding:12px 14px;font-size:16px;color:${BRAND.textPrim};text-align:right;font-weight:600;font-variant-numeric:tabular-nums;">${$(amountUSD)}<span style="font-size:11px;color:${BRAND.textMuted};font-weight:400;"> USD</span></td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+        </table>
+
+        ${cardLabel ? `<p style="margin:0 0 18px;font-size:12.5px;color:${BRAND.textMuted};"><span style="color:${BRAND.textSub};font-weight:500;">Paid with</span> ${escapeHtml(cardLabel)}</p>` : ''}
+
+        <!-- Credit balance highlight -->
+        <div style="margin:6px 0 4px;padding:14px 16px;background:${BRAND.lightBg};border-radius:8px;border-left:3px solid ${BRAND.color};">
+          <p style="margin:0;font-size:12.5px;color:${BRAND.textSub};">
+            <strong style="color:${BRAND.color};font-size:14px;">+${credits} credits</strong> added to your wallet
+          </p>
+          <p style="margin:4px 0 0;font-size:12px;color:${BRAND.textMuted};">
+            New balance: <strong style="color:${BRAND.textPrim};">${newBalance} credits</strong> — credits never expire.
+          </p>
+        </div>
+      `,
+      ctaLabel: invoiceHostedUrl ? 'View full invoice' : 'Open EdgeAI',
+      ctaUrl:   invoiceHostedUrl || BRAND.url,
+      footerNote: `
+        ${invoicePdfUrl ? `<p style="margin:0 0 6px;">Download as PDF: <a href="${invoicePdfUrl}" style="color:${BRAND.textSub};">${invNumStr}.pdf</a></p>` : ''}
+        <p style="margin:0;">Need a refund? Within 2 hours of purchase, self-serve from your wallet. After that, reply to this email.</p>
+      `,
+    }),
+    text: [
+      `Invoice ${invNumStr}`,
+      `Issued: ${dateStr}`,
+      '',
+      'STATUS: PAID',
+      '',
+      `Billed to: ${name}`,
+      `From:      ${BRAND.name}`,
+      '',
+      '─────────────────────────────────────',
+      `Description:  ${packLabel}`,
+      `              ${credits} credits × 1 unlock each`,
+      `Quantity:     ${credits}`,
+      `Unit price:   ${$(unitPrice)}`,
+      '─────────────────────────────────────',
+      `Subtotal:     ${$(subTotal)}`,
+      taxUSD > 0 ? `Tax:          ${$(taxUSD)}` : null,
+      `Total paid:   ${$(amountUSD)} USD`,
+      '─────────────────────────────────────',
+      '',
+      cardLabel ? `Paid with:    ${cardLabel}` : null,
+      `Credits added: +${credits}`,
+      `New balance:   ${newBalance} credits`,
+      '',
+      invoiceHostedUrl ? `View invoice: ${invoiceHostedUrl}` : null,
+      invoicePdfUrl    ? `PDF:          ${invoicePdfUrl}`   : null,
+      `App:          ${BRAND.url}`,
+      '',
+      'Need a refund? Within 2 hours self-serve from your wallet. After that, reply here.',
+      textFooter(),
+    ].filter(Boolean).join('\n'),
+  };
+};
 
 /**
- * Refund confirmation email.
+ * Refund confirmation email — mirrors the invoice's formality so it
+ * reads like a proper credit-note, not a support ticket update.
  */
-const refundConfirmation = ({ name, amountUSD, creditsReversed, refundId }) => ({
-  subject: 'Refund confirmed — EdgeAI',
-  html: _shell({
-    preview:  `Your $${Number(amountUSD).toFixed(2)} refund has been issued.`,
-    heading:  'Refund on the way.',
-    bodyHtml: `
-      <p style="margin:0 0 14px;">Hi ${escapeHtml(name)}, we've issued a refund of <strong>$${Number(amountUSD).toFixed(2)}</strong> USD. ${creditsReversed > 0 ? `${creditsReversed} credits have been deducted from your wallet.` : ''}</p>
-      <p style="margin:0;">Depending on your card issuer, the money usually appears in your account within <strong>5–10 business days</strong>.</p>
-      <p style="margin:14px 0 0;font-size:12px;color:${BRAND.textMuted};">Refund reference: ${escapeHtml(refundId || '')}</p>
-    `,
-  }),
-  text: [
-    `Hi ${name},`,
-    '',
-    `We've issued a refund of $${Number(amountUSD).toFixed(2)} USD.${creditsReversed > 0 ? ` ${creditsReversed} credits have been deducted from your wallet.` : ''}`,
-    '',
-    'Depending on your card issuer, the money usually appears in your account within 5–10 business days.',
-    '',
-    `Refund reference: ${refundId || ''}`,
-    '',
-    '— EdgeAI',
-    textFooter(),
-  ].join('\n'),
-});
+const refundConfirmation = ({ name, amountUSD, creditsReversed, refundId }) => {
+  const $ = (v) => `$${Number(v || 0).toFixed(2)}`;
+  const dateStr = new Date().toLocaleDateString('en-US', {
+    year: 'numeric', month: 'long', day: 'numeric',
+  });
+  const refShort = refundId ? refundId.slice(-16) : '';
+
+  return {
+    subject: `Refund issued — ${$(amountUSD)} — EdgeAI`,
+    html: _shell({
+      preview: `Your ${$(amountUSD)} refund has been issued. Funds arrive in 5–10 business days.`,
+      heading: 'Credit note',
+      bodyHtml: `
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 20px;">
+          <tr>
+            <td style="font-size:12px;color:${BRAND.textMuted};line-height:1.5;">
+              <span style="color:${BRAND.textSub};font-weight:500;font-variant-numeric:tabular-nums;">${escapeHtml(refShort || 'REFUND')}</span>
+              <br>Issued ${dateStr}
+            </td>
+            <td style="text-align:right;vertical-align:top;">
+              <span style="display:inline-block;padding:4px 12px;background:${BRAND.color};color:#ffffff;border-radius:4px;font-size:11px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;">Refunded</span>
+            </td>
+          </tr>
+        </table>
+
+        <p style="margin:0 0 18px;font-size:14px;color:${BRAND.textPrim};">
+          Hi ${escapeHtml(name)}, we've issued a refund on your recent EdgeAI purchase.
+        </p>
+
+        <!-- Refund summary block, styled like the invoice's totals card. -->
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;margin:0 0 20px;">
+          <tr>
+            <td style="padding:10px 14px;background:${BRAND.lightBg};font-size:13px;color:${BRAND.textMuted};border-radius:6px 6px 0 0;">Refund amount</td>
+            <td style="padding:10px 14px;background:${BRAND.lightBg};font-size:14px;color:${BRAND.textPrim};text-align:right;font-weight:600;font-variant-numeric:tabular-nums;border-radius:6px 6px 0 0;">${$(amountUSD)} USD</td>
+          </tr>
+          ${creditsReversed > 0 ? `<tr>
+            <td style="padding:10px 14px;background:${BRAND.lightBg};font-size:13px;color:${BRAND.textMuted};border-top:1px solid #e5e7eb;">Credits reversed</td>
+            <td style="padding:10px 14px;background:${BRAND.lightBg};font-size:13px;color:${BRAND.textPrim};text-align:right;font-weight:500;font-variant-numeric:tabular-nums;border-top:1px solid #e5e7eb;">−${creditsReversed}</td>
+          </tr>` : ''}
+          <tr>
+            <td style="padding:10px 14px;background:${BRAND.lightBg};font-size:13px;color:${BRAND.textMuted};border-top:1px solid #e5e7eb;border-radius:0 0 6px 6px;">Refund reference</td>
+            <td style="padding:10px 14px;background:${BRAND.lightBg};font-size:12px;color:${BRAND.textSub};text-align:right;font-family:'DM Mono',monospace;font-variant-numeric:tabular-nums;border-top:1px solid #e5e7eb;border-radius:0 0 6px 6px;">${escapeHtml(refundId || '—')}</td>
+          </tr>
+        </table>
+
+        <p style="margin:0 0 8px;font-size:13px;color:${BRAND.textSub};">
+          <strong style="color:${BRAND.textPrim};font-weight:500;">When will the money land?</strong>
+        </p>
+        <p style="margin:0;font-size:13px;color:${BRAND.textSub};">
+          Depending on your card issuer, funds typically arrive back on the original card within
+          <strong style="color:${BRAND.textPrim};">5–10 business days</strong>. The refund appears with the
+          same statement descriptor as the original charge.
+        </p>
+      `,
+      footerNote: 'If you don\'t see the refund within 10 business days, reply to this email with your reference number and we\'ll trace it with the payment network.',
+    }),
+    text: [
+      `Credit note — issued ${dateStr}`,
+      refShort ? `Reference: ${refShort}` : null,
+      '',
+      'STATUS: REFUNDED',
+      '',
+      `Hi ${name},`,
+      '',
+      `We've issued a refund of ${$(amountUSD)} USD on your recent EdgeAI purchase.`,
+      '',
+      '─────────────────────────────────────',
+      `Refund amount:     ${$(amountUSD)} USD`,
+      creditsReversed > 0 ? `Credits reversed:  -${creditsReversed}` : null,
+      `Refund reference:  ${refundId || '—'}`,
+      '─────────────────────────────────────',
+      '',
+      'When will the money land?',
+      'Depending on your card issuer, funds typically arrive back on the original card within 5-10 business days.',
+      '',
+      "If you don't see the refund within 10 business days, reply to this email with your reference number and we'll trace it with the payment network.",
+      textFooter(),
+    ].filter(Boolean).join('\n'),
+  };
+};
 
 /**
  * Admin alert when a chargeback is opened. Not sent to end users.

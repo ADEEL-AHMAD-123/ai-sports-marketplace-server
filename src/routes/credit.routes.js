@@ -35,7 +35,8 @@ router.use(protect);
 router.get ('/balance',       c.getBalance);
 router.get ('/packs',         c.getCreditPacks);
 router.get ('/summary',       c.getSummary);
-router.get ('/transactions',  validatePagination, c.getTransactions);
+router.get ('/transactions',        validatePagination, c.getTransactions);
+router.get ('/transactions/:txId',  c.getTransactionById);
 
 router.post('/checkout',      paymentLimiter, requireVerifiedEmail, validateCreditPurchase, c.createCheckout);
 router.post('/portal',        paymentLimiter, c.createPortal);

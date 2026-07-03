@@ -123,8 +123,34 @@ class CreditService {
         userId: user._id.toString(),
         packId: pack.id,
       },
+      // Auto-generate a Stripe Invoice for every successful checkout —
+      // gives us an official invoice number, a hosted invoice page URL,
+      // and a PDF the customer can download. We embed both links in the
+      // receipt email so the receipt looks like a proper invoice from
+      // Stripe / Vercel / Linear etc.
+      invoice_creation: {
+        enabled: true,
+        invoice_data: {
+          description: `${pack.label} — ${pack.credits} EdgeAI credits`,
+          footer: 'Thanks for supporting EdgeAI. Credits never expire. ' +
+                  'Questions? Reply to this email.',
+          metadata: {
+            userId: user._id.toString(),
+            packId: pack.id,
+            credits: String(pack.credits),
+          },
+          // Custom fields show up on the PDF as extra rows.
+          custom_fields: [
+            { name: 'Credits',      value: String(pack.credits) },
+            { name: 'Per credit',   value: `$${(pack.perCredit || pack.amount / pack.credits).toFixed(2)}` },
+          ],
+          rendering_options: { amount_tax_display: 'include_inclusive_tax' },
+        },
+      },
       // Automatic tax if configured on the Stripe account.
       automatic_tax: { enabled: false },
+      // Ask for billing details — used on the invoice + helps deliverability.
+      billing_address_collection: 'auto',
       // Time-box the session so abandoned checkouts don't clutter Stripe.
       expires_at: Math.floor(Date.now() / 1000) + 30 * 60, // 30 minutes
     }, { idempotencyKey: key });
@@ -248,19 +274,47 @@ class CreditService {
     const creditsToAdd = pack.credits;
     const newBalance   = user.credits + creditsToAdd;
 
-    // Retrieve the payment intent to grab the underlying chargeId — we need
-    // it later to correlate refunds and disputes back to this purchase.
-    let chargeId = null;
+    // Retrieve the payment intent to grab the underlying chargeId + card
+    // details. chargeId lets us correlate refunds and disputes back to
+    // this purchase; card brand + last4 go on the invoice email.
+    let chargeId       = null;
     let paymentIntentId = session.payment_intent;
+    let cardBrand      = null;
+    let cardLast4      = null;
     try {
       if (paymentIntentId) {
         const pi = await stripe.paymentIntents.retrieve(paymentIntentId, {
-          expand: ['latest_charge'],
+          expand: ['latest_charge.payment_method_details.card'],
         });
-        chargeId = pi.latest_charge?.id || pi.latest_charge || null;
+        const charge = typeof pi.latest_charge === 'object' ? pi.latest_charge : null;
+        chargeId  = charge?.id || pi.latest_charge || null;
+        const cardDetails = charge?.payment_method_details?.card;
+        if (cardDetails) {
+          cardBrand = cardDetails.brand;
+          cardLast4 = cardDetails.last4;
+        }
       }
     } catch (err) {
-      logger.warn('⚠️ Failed to expand payment intent — refund correlation will be by PI only', {
+      logger.warn('⚠️ Failed to expand payment intent — refund + card details missing', {
+        error: err.message,
+      });
+    }
+
+    // Retrieve the Stripe-generated invoice (created because we enabled
+    // `invoice_creation` on the checkout session). Gives us a hosted PDF
+    // + invoice number to put on the receipt email.
+    let invoiceNumber   = null;
+    let invoicePdfUrl   = null;
+    let invoiceHostedUrl = null;
+    try {
+      if (session.invoice) {
+        const inv = await stripe.invoices.retrieve(session.invoice);
+        invoiceNumber   = inv.number || null;      // e.g. "INV-0001"
+        invoicePdfUrl   = inv.invoice_pdf || null; // direct PDF
+        invoiceHostedUrl = inv.hosted_invoice_url || null; // hosted web view
+      }
+    } catch (err) {
+      logger.warn('⚠️ Failed to retrieve Stripe invoice — receipt will fall back to session ID', {
         error: err.message,
       });
     }
@@ -274,13 +328,20 @@ class CreditService {
       balanceAfter: newBalance,
       description: `Purchased ${pack.label} (${creditsToAdd} credits)`,
       stripe: {
-        sessionId: session.id,
+        sessionId:  session.id,
         paymentIntentId,
         chargeId,
         amountPaid: session.amount_total,
         creditsPurchased: creditsToAdd,
-        priceId: pack.priceId,
-        packId:  pack.id,
+        priceId:    pack.priceId,
+        packId:     pack.id,
+        // Persist card + invoice details for the transaction detail page,
+        // so we don't hit Stripe every time the user opens their history.
+        cardBrand,
+        cardLast4,
+        invoiceNumber,
+        invoicePdfUrl,
+        invoiceHostedUrl,
       },
     });
 
@@ -288,16 +349,25 @@ class CreditService {
       userId, creditsAdded: creditsToAdd, newBalance, sessionId: session.id,
     });
 
-    // Send receipt email — fire-and-forget so it never blocks credit
-    // granting. EmailService catches its own errors.
+    // Send invoice-style receipt email. Fire-and-forget so it never
+    // blocks credit granting.
     EmailService.sendPurchaseReceipt({
-      to:         user.email,
-      name:       user.name,
-      packLabel:  pack.label,
-      credits:    creditsToAdd,
-      amountUSD:  (session.amount_total || 0) / 100,
+      to:            user.email,
+      name:          user.name,
+      packLabel:     pack.label,
+      credits:       creditsToAdd,
+      perCreditUSD:  pack.perCredit || (pack.amount / pack.credits),
+      subtotalUSD:   (session.amount_subtotal ?? session.amount_total ?? 0) / 100,
+      taxUSD:        (session.total_details?.amount_tax || 0) / 100,
+      amountUSD:     (session.amount_total || 0) / 100,
       newBalance,
-      sessionId:  session.id,
+      cardBrand,
+      cardLast4,
+      invoiceNumber,
+      invoicePdfUrl,
+      invoiceHostedUrl,
+      invoiceDate:   new Date(session.created * 1000),
+      sessionId:     session.id,
     }).catch((err) => logger.warn('[Email] receipt send failed', { error: err.message }));
   }
 
@@ -616,6 +686,43 @@ class CreditService {
       total,
       pages: Math.ceil(total / limit),
       currentPage: page,
+    };
+  }
+
+  /**
+   * Fetch a single transaction by ID for the detail page. Enforces user
+   * ownership at the query level so a user can't read someone else's
+   * receipts by guessing IDs.
+   *
+   * For PURCHASE transactions, also enriches with an `isRefundable` flag
+   * so the frontend knows whether to show the refund action.
+   */
+  async getTransactionById({ userId, transactionId }) {
+    const tx = await Transaction.findOne({
+      _id: transactionId,
+      userId,
+    }).lean();
+    if (!tx) return null;
+
+    // Compute refund eligibility for PURCHASE transactions.
+    let isRefundable = false;
+    if (tx.type === TRANSACTION_TYPES.PURCHASE && tx.stripe?.paymentIntentId) {
+      const hoursSince = (Date.now() - new Date(tx.createdAt).getTime()) / 3_600_000;
+      if (hoursSince <= REFUND_SELF_SERVE_WINDOW_HOURS) {
+        // Also check the tx hasn't already been refunded.
+        const alreadyRefunded = await Transaction.findOne({
+          userId,
+          type: TRANSACTION_TYPES.REFUND,
+          'stripe.paymentIntentId': tx.stripe.paymentIntentId,
+        }).lean();
+        isRefundable = !alreadyRefunded;
+      }
+    }
+
+    return {
+      ...tx,
+      isRefundable,
+      refundWindowHours: REFUND_SELF_SERVE_WINDOW_HOURS,
     };
   }
 

@@ -40,6 +40,55 @@ const getSports = (req, res) => {
   res.status(HTTP_STATUS.OK).json({ success: true, sports });
 };
 
+// ─── Games count per sport (public — for smart sport selection) ────────────
+
+/**
+ * GET /api/odds/counts
+ *
+ * Returns the number of upcoming games per sport within the display
+ * window. Used by the frontend on app boot to auto-select the first
+ * sport with games (so a user who opens the app during NBA off-season
+ * lands on MLB rather than an empty NBA slate).
+ *
+ * Public — no auth. Cached briefly to keep the boot latency down.
+ */
+const getGameCounts = async (req, res, next) => {
+  try {
+    const cacheKey = `${CACHE_KEYS.SCHEDULE}:counts:${_getTodayKey()}`;
+    const cached = await cacheGet(cacheKey);
+    if (cached) {
+      return res.status(HTTP_STATUS.OK).json({
+        success: true, source: 'cache', counts: cached,
+      });
+    }
+
+    // Match the exact same window logic getGames() uses so the counts
+    // reflect what a user would see if they picked that sport.
+    const now = new Date();
+    const displayHours = Math.max(24, parseInt(process.env.GAME_LIST_WINDOW_HOURS || '168', 10));
+    const windowStart  = new Date(now.getTime() - 3 * 60 * 60 * 1000);
+    const windowEnd    = new Date(now.getTime() + displayHours * 60 * 60 * 1000);
+
+    const rows = await Game.aggregate([
+      {
+        $match: {
+          startTime: { $gte: windowStart, $lte: windowEnd },
+          status:    { $in: ['scheduled', 'live'] },
+        },
+      },
+      { $group: { _id: '$sport', count: { $sum: 1 } } },
+    ]);
+
+    const counts = { nba: 0, mlb: 0, nhl: 0, nfl: 0, soccer: 0 };
+    for (const r of rows) if (r._id in counts) counts[r._id] = r.count;
+
+    // Short TTL — game state changes hourly but boot latency matters more.
+    await cacheSet(cacheKey, counts, 300); // 5 minutes
+
+    res.status(HTTP_STATUS.OK).json({ success: true, source: 'db', counts });
+  } catch (err) { next(err); }
+};
+
 // ─── Games ─────────────────────────────────────────────────────────────────────
 
 const getGames = async (req, res, next) => {
@@ -505,5 +554,5 @@ const refreshProps = async (req, res, next) => {
   }
 };
 
-module.exports = { getSports, getGames, getProps, refreshProps };
+module.exports = { getSports, getGames, getGameCounts, getProps, refreshProps };
 

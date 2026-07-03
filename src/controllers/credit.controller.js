@@ -132,6 +132,24 @@ const getTransactions = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+// ─── Single transaction detail ────────────────────────────────────────────
+const getTransactionById = async (req, res, next) => {
+  try {
+    const { txId } = req.params;
+    if (!txId || !/^[a-f0-9]{24}$/i.test(txId)) {
+      throw new AppError('Invalid transaction ID.', HTTP_STATUS.BAD_REQUEST);
+    }
+    const tx = await CreditService.getTransactionById({
+      userId: req.user._id,
+      transactionId: txId,
+    });
+    if (!tx) {
+      throw new AppError('Transaction not found.', HTTP_STATUS.NOT_FOUND);
+    }
+    res.status(HTTP_STATUS.OK).json({ success: true, transaction: tx });
+  } catch (err) { next(err); }
+};
+
 // ─── Spend summary ────────────────────────────────────────────────────────
 const getSummary = async (req, res, next) => {
   try {
@@ -180,5 +198,6 @@ const createPortal = async (req, res, next) => {
 
 module.exports = {
   getBalance, getCreditPacks, createCheckout, stripeWebhook,
-  getTransactions, getSummary, requestRefund, createPortal,
+  getTransactions, getTransactionById, getSummary,
+  requestRefund, createPortal,
 };

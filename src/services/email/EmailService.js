@@ -166,10 +166,22 @@ const sendWelcome = ({ to, name, credits }) =>
 const sendPasswordReset = ({ to, name, resetUrl }) =>
   send({ to, category: 'password-reset', ...templates.passwordReset({ name, resetUrl }) });
 
-const sendPurchaseReceipt = ({ to, name, packLabel, credits, amountUSD, newBalance, sessionId }) =>
+const sendPurchaseReceipt = ({
+  to, name, packLabel, credits, perCreditUSD,
+  subtotalUSD, taxUSD, amountUSD, newBalance,
+  cardBrand, cardLast4,
+  invoiceNumber, invoicePdfUrl, invoiceHostedUrl, invoiceDate,
+  sessionId,
+}) =>
   send({
-    to, category: 'receipt',
-    ...templates.purchaseReceipt({ name, packLabel, credits, amountUSD, newBalance, sessionId }),
+    to, category: 'invoice',
+    ...templates.purchaseReceipt({
+      name, packLabel, credits, perCreditUSD,
+      subtotalUSD, taxUSD, amountUSD, newBalance,
+      cardBrand, cardLast4,
+      invoiceNumber, invoicePdfUrl, invoiceHostedUrl, invoiceDate,
+      sessionId,
+    }),
   });
 
 const sendRefundConfirmation = ({ to, name, amountUSD, creditsReversed, refundId }) =>

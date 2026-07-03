@@ -64,6 +64,15 @@ const transactionSchema = new mongoose.Schema(
       creditsPurchased: Number,
       priceId:       String,    // The Stripe price ID that was purchased
       packId:        String,    // Our internal pack ID
+      // Card details captured at checkout — for wallet display + support.
+      cardBrand:     String,    // 'visa' | 'mastercard' | 'amex' | ...
+      cardLast4:     String,    // '4242'
+      // Invoice details — Stripe auto-generates these when invoice_creation
+      // is enabled on the checkout session. Persisted so the detail page
+      // and support inbox don't need to hit Stripe again to display them.
+      invoiceNumber:    String, // 'INV-0042'
+      invoicePdfUrl:    String, // signed URL to hosted PDF
+      invoiceHostedUrl: String, // Stripe-hosted invoice page (has "download PDF" button too)
     },
 
     // ── Insight metadata (for INSIGHT_UNLOCK / REFUND transactions) ──────────

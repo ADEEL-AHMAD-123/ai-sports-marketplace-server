@@ -16,6 +16,9 @@ const { validateSportParam, validateEventIdParam } = require('../middleware/vali
 // GET /api/odds/sports
 router.get('/sports', oddsController.getSports);
 
+// GET /api/odds/counts — game counts per sport (for smart sport default)
+router.get('/counts', oddsController.getGameCounts);
+
 // GET /api/odds/:sport/games
 router.get('/:sport/games', validateSportParam, optionalAuth, oddsController.getGames);
 
