@@ -33,33 +33,68 @@ const parseBooleanEnv = (value, defaultValue = false) => {
 const REDIS_ENABLED = parseBooleanEnv(process.env.REDIS_ENABLED, true);
 
 // ─── Build connection config from env ────────────────────────────────────────
-const redisConfig = {
-  host: process.env.REDIS_HOST || '127.0.0.1',
-  port: parseInt(process.env.REDIS_PORT || '6379', 10),
-  db: parseInt(process.env.REDIS_DB || '0', 10),
-  // TLS required for Upstash and other managed Redis providers
-  ...(parseBooleanEnv(process.env.REDIS_TLS, false) ? { tls: {} } : {}),
-  // Retry strategy: exponential back-off up to 30 seconds
+//
+// Two config paths, in preference order:
+//   1. REDIS_URL — full connection string (redis://user:pass@host:port/db).
+//      Preferred when set because it's copy-paste from most managed Redis
+//      dashboards (Railway, Upstash, Render) and can't be misassembled.
+//   2. Individual REDIS_HOST / REDIS_PORT / REDIS_PASSWORD parts.
+//
+// Common failure mode this defends against: Railway `${{ServiceName.VAR}}`
+// reference syntax fails silently when the service name is wrong, leaving
+// REDIS_HOST as an empty string. ioredis then defaults to 127.0.0.1:6379
+// and every command fails ECONNREFUSED. With this refactor:
+//   - REDIS_URL always wins if set (safest for managed providers).
+//   - If REDIS_HOST is empty AND no URL is set, we refuse to boot the
+//     client rather than silently target localhost.
+
+const commonOpts = {
   retryStrategy(times) {
     const delay = Math.min(times * 500, 30000);
     logger.warn(`⏳ Redis retry attempt #${times}. Next attempt in ${delay}ms`);
     return delay;
   },
-  // Lazy connect: don't connect until first command
   lazyConnect: true,
-  // Max reconnection attempts (null = unlimited)
   maxRetriesPerRequest: 3,
 };
 
-// Only add password if provided (avoids Redis auth error on local dev)
-if (process.env.REDIS_PASSWORD) {
-  redisConfig.password = process.env.REDIS_PASSWORD;
-}
+const redisUrl = normalizeEnvValue(process.env.REDIS_URL);
+const useTls   = parseBooleanEnv(process.env.REDIS_TLS, false);
 
-// ─── Create singleton client (or null stub when disabled) ────────────────────
-const redisClient = REDIS_ENABLED ? new Redis(redisConfig) : null;
+const buildClient = () => {
+  if (!REDIS_ENABLED) return null;
 
-if (REDIS_ENABLED) {
+  if (redisUrl) {
+    logger.info('🔌 Redis: connecting via REDIS_URL');
+    return new Redis(redisUrl, { ...commonOpts, ...(useTls ? { tls: {} } : {}) });
+  }
+
+  const host = normalizeEnvValue(process.env.REDIS_HOST);
+  if (!host) {
+    logger.error('❌ Redis: no REDIS_URL and no REDIS_HOST set. Refusing to start localhost fallback.');
+    logger.error('    Set either REDIS_URL=redis://... or REDIS_HOST/PORT/PASSWORD on this service.');
+    return null;
+  }
+
+  const redisConfig = {
+    host,
+    port: parseInt(process.env.REDIS_PORT || '6379', 10),
+    db:   parseInt(process.env.REDIS_DB   || '0', 10),
+    ...(useTls ? { tls: {} } : {}),
+    ...commonOpts,
+  };
+  const password = normalizeEnvValue(process.env.REDIS_PASSWORD);
+  if (password) redisConfig.password = password;
+
+  logger.info(`🔌 Redis: connecting to ${host}:${redisConfig.port}`);
+  return new Redis(redisConfig);
+};
+
+const redisClient = buildClient();
+
+// Only attach event listeners if we actually built a client. buildClient()
+// returns null both when Redis is disabled AND when config is missing.
+if (redisClient) {
   // ─── Connection event logging ───────────────────────────────────────────────
   redisClient.on('connect', () => {
     logger.info('✅ Redis connecting...');
