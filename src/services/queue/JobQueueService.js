@@ -160,6 +160,17 @@ class JobQueueService {
 
     this.workerConnection = this._createConnection();
 
+    // Redis-quota tuning:
+    //   - `drainDelay` = how long the blocking-pop waits when the queue is
+    //     empty. Default is 5 seconds ⇒ ~12 Redis polls/min per worker.
+    //     Bumping to 60s cuts idle Redis polling by 12× at the cost of a
+    //     slightly higher first-job pickup latency (up to 1 min if the
+    //     server was fully idle).
+    //   - Insight worker keeps a shorter delay (15s) because user unlock
+    //     latency is user-visible; the two background workers (outcome +
+    //     scoring) can be sluggish.
+    const idleDelay = (s) => Math.max(5, parseInt(process.env.BULLMQ_IDLE_DELAY_SECONDS || String(s), 10));
+
     const insightWorker = new Worker(
       INSIGHT_QUEUE_NAME,
       async (job) => {
@@ -185,6 +196,7 @@ class JobQueueService {
       {
         connection: this.workerConnection,
         concurrency: Math.max(1, parseInt(process.env.INSIGHT_WORKER_CONCURRENCY || '4', 10)),
+        drainDelay:  idleDelay(15),
       }
     );
 
@@ -197,6 +209,7 @@ class JobQueueService {
       {
         connection: this.workerConnection,
         concurrency: Math.max(1, parseInt(process.env.OUTCOME_WORKER_CONCURRENCY || '3', 10)),
+        drainDelay:  idleDelay(60),
       }
     );
 
@@ -211,6 +224,7 @@ class JobQueueService {
       {
         connection: this.workerConnection,
         concurrency: Math.max(1, parseInt(process.env.SCORING_WORKER_CONCURRENCY || '2', 10)),
+        drainDelay:  idleDelay(60),
       }
     );
 
