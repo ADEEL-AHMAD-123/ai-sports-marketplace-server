@@ -35,15 +35,37 @@ class JobQueueService {
   }
 
   _createConnection() {
-    const config = {
-      host: process.env.REDIS_HOST || '127.0.0.1',
-      port: parseInt(process.env.REDIS_PORT || '6379', 10),
-      db: parseInt(process.env.REDIS_DB || '0', 10),
-      maxRetriesPerRequest: null,
-      lazyConnect: true,
-      ...(process.env.REDIS_TLS === 'true' ? { tls: {} } : {}),
+    // Mirror the two-path config used by the shared cache client in
+    // config/redis.js — REDIS_URL wins when set, otherwise fall back to
+    // individual REDIS_HOST/PORT/PASSWORD parts. Silent localhost
+    // fallback is what caused all the ECONNREFUSED noise the first time.
+    const commonOpts = {
+      maxRetriesPerRequest: null, // BullMQ needs unlimited retries
+      lazyConnect:          true,
     };
 
+    const url    = String(process.env.REDIS_URL || '').trim().replace(/^['"]|['"]$/g, '');
+    const useTls = String(process.env.REDIS_TLS || '').toLowerCase() === 'true';
+
+    if (url) {
+      return new IORedis(url, { ...commonOpts, ...(useTls ? { tls: {} } : {}) });
+    }
+
+    const host = String(process.env.REDIS_HOST || '').trim().replace(/^['"]|['"]$/g, '');
+    if (!host) {
+      throw new Error(
+        '[JobQueueService] Neither REDIS_URL nor REDIS_HOST is set. ' +
+        'Cannot connect to Redis — refusing localhost fallback.'
+      );
+    }
+
+    const config = {
+      host,
+      port: parseInt(process.env.REDIS_PORT || '6379', 10),
+      db:   parseInt(process.env.REDIS_DB   || '0', 10),
+      ...(useTls ? { tls: {} } : {}),
+      ...commonOpts,
+    };
     if (process.env.REDIS_PASSWORD) config.password = process.env.REDIS_PASSWORD;
 
     return new IORedis(config);
