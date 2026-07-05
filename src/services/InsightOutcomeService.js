@@ -304,9 +304,22 @@ class InsightOutcomeService {
     });
 
     const resolved = rows.filter(r => ['win', 'loss', 'push'].includes(r.result));
-    const wins     = resolved.filter(r => r.result === 'win').length;
-    const losses   = resolved.filter(r => r.result === 'loss').length;
-    const pushes   = resolved.filter(r => r.result === 'push').length;
+
+    // Per-sport breakdown — only include sports that actually had graded
+    // outcomes in this window. A sport with zero games has no evidence and
+    // must never influence the overall win rate (either as a denominator or
+    // as a "0%" tile in the response).
+    const bySportRows = ['nba', 'mlb', 'nhl', 'nfl', 'soccer']
+      .map(sport => buildBandSummary(resolved.filter(r => r.sport === sport), sport))
+      .filter(r => r.graded > 0);
+
+    // Overall aggregates are derived from ONLY sports with data. This is
+    // numerically identical to summing over `resolved` directly (a sport
+    // with graded=0 contributes 0 to wins/losses/pushes), but the code
+    // makes the intent explicit: no-data sports do not participate.
+    const wins   = bySportRows.reduce((s, r) => s + r.wins,   0);
+    const losses = bySportRows.reduce((s, r) => s + r.losses, 0);
+    const pushes = bySportRows.reduce((s, r) => s + r.pushes, 0);
 
     const winRows  = resolved.filter(r => r.result === 'win');
     const lossRows = resolved.filter(r => r.result === 'loss');
@@ -316,10 +329,6 @@ class InsightOutcomeService {
         ? Number((valid.reduce((s, v) => s + Math.abs(v), 0) / valid.length).toFixed(2))
         : null;
     };
-
-    const bySportRows = ['nba', 'mlb', 'nhl', 'nfl', 'soccer'].map(sport =>
-      buildBandSummary(resolved.filter(r => r.sport === sport), sport)
-    );
 
     const byConfidenceRows = [
       { label: '80-100', min: 80,  max: 100    },
@@ -331,19 +340,24 @@ class InsightOutcomeService {
         return score >= band.min && score <= band.max;
       }),
       band.label
-    ));
+    )).filter(r => r.graded > 0);   // drop empty confidence bands too
 
     // Per-stat-type accuracy — every distinct statType present in the graded
     // set (NBA points/rebounds/…, MLB hits/strikeouts/…, etc.).
     const statTypeRows = [...new Set(resolved.map(r => r.statType).filter(Boolean))]
       .sort()
-      .map(st => buildBandSummary(resolved.filter(r => r.statType === st), st));
+      .map(st => buildBandSummary(resolved.filter(r => r.statType === st), st))
+      .filter(r => r.graded > 0);
 
     const summary = {
       scannedInsights:  insights.length,
       startedInsights:  started.length,
       graded:           resolved.length,
       unresolved:       rows.filter(r => ['unresolved', 'pending'].includes(r.result)).length,
+      // Number of sports that contributed to the overall win rate. Useful
+      // for the UI ("N sports · X graded games") without needing to count
+      // the bySport object length client-side.
+      sportsWithData:   bySportRows.length,
       wins, losses, pushes,
       winRateExPush:    (wins + losses)
         ? Number((wins * 100 / (wins + losses)).toFixed(2))
