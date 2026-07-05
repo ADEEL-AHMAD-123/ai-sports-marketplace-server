@@ -53,11 +53,20 @@ const getPlatformStats = async (req, res, next) => {
       totalUsers,
       newUsersToday,
       newUsersThisWeek,
+      newUsersThisMonth,
+      verifiedUsersCount,
       totalInsights,
       insightsToday,
       insightsThisWeek,
       totalCreditsSpent,
       totalRevenueCents,
+      revenueTodayCents,
+      revenueThisWeekCents,
+      purchasesTotalCount,
+      purchasesTodayCount,
+      refundsTotalCents,
+      refundsTotalCount,
+      creditsHeldAggregate,
       activePropsCount,
       scheduledGamesCount,
       // Accuracy: insights by confidence label breakdown
@@ -66,6 +75,10 @@ const getPlatformStats = async (req, res, next) => {
       dataQualityBreakdown,
       // Accuracy: insights by recommendation
       recommendationBreakdown,
+      // Insights + unlock volume grouped by sport
+      sportBreakdown,
+      // Top-5 most-unlocked players in the last 7 days
+      topPlayers,
       // Recent insights for prediction log (last 20)
       recentInsights,
       // HC/BV tag counts
@@ -78,6 +91,8 @@ const getPlatformStats = async (req, res, next) => {
       User.countDocuments(),
       User.countDocuments({ createdAt: { $gte: startOfToday } }),
       User.countDocuments({ createdAt: { $gte: startOf7DaysAgo } }),
+      User.countDocuments({ createdAt: { $gte: startOf30DaysAgo } }),
+      User.countDocuments({ isEmailVerified: true }),
       Insight.countDocuments({ status: INSIGHT_STATUS.GENERATED }),
       Insight.countDocuments({ status: INSIGHT_STATUS.GENERATED, createdAt: { $gte: startOfToday } }),
       Insight.countDocuments({ status: INSIGHT_STATUS.GENERATED, createdAt: { $gte: startOf7DaysAgo } }),
@@ -90,6 +105,30 @@ const getPlatformStats = async (req, res, next) => {
       Transaction.aggregate([
         { $match: { type: TRANSACTION_TYPES.PURCHASE } },
         { $group: { _id: null, total: { $sum: '$stripe.amountPaid' } } },
+      ]),
+
+      Transaction.aggregate([
+        { $match: { type: TRANSACTION_TYPES.PURCHASE, createdAt: { $gte: startOfToday } } },
+        { $group: { _id: null, total: { $sum: '$stripe.amountPaid' } } },
+      ]),
+
+      Transaction.aggregate([
+        { $match: { type: TRANSACTION_TYPES.PURCHASE, createdAt: { $gte: startOf7DaysAgo } } },
+        { $group: { _id: null, total: { $sum: '$stripe.amountPaid' } } },
+      ]),
+
+      Transaction.countDocuments({ type: TRANSACTION_TYPES.PURCHASE }),
+      Transaction.countDocuments({ type: TRANSACTION_TYPES.PURCHASE, createdAt: { $gte: startOfToday } }),
+
+      Transaction.aggregate([
+        { $match: { type: TRANSACTION_TYPES.REFUND } },
+        { $group: { _id: null, total: { $sum: { $abs: '$stripe.amountPaid' } } } },
+      ]),
+
+      Transaction.countDocuments({ type: TRANSACTION_TYPES.REFUND }),
+
+      User.aggregate([
+        { $group: { _id: null, total: { $sum: '$credits' } } },
       ]),
 
       PlayerProp.countDocuments({ isAvailable: true }),
@@ -116,6 +155,31 @@ const getPlatformStats = async (req, res, next) => {
       Insight.aggregate([
         { $match: { status: INSIGHT_STATUS.GENERATED } },
         { $group: { _id: '$recommendation', count: { $sum: 1 } } },
+      ]),
+
+      // Sport activity — insights + unlock volume grouped by sport (all-time)
+      Insight.aggregate([
+        { $match: { status: INSIGHT_STATUS.GENERATED } },
+        { $group: {
+          _id: '$sport',
+          insights: { $sum: 1 },
+          unlocks:  { $sum: { $ifNull: ['$unlockCount', 0] } },
+        }},
+      ]),
+
+      // Top-unlocked players (last 7 days by insight createdAt)
+      Insight.aggregate([
+        { $match: {
+          status: INSIGHT_STATUS.GENERATED,
+          createdAt: { $gte: startOf7DaysAgo },
+        }},
+        { $group: {
+          _id: { playerName: '$playerName', sport: '$sport' },
+          unlocks:  { $sum: { $ifNull: ['$unlockCount', 0] } },
+          insights: { $sum: 1 },
+        }},
+        { $sort: { unlocks: -1, insights: -1 } },
+        { $limit: 5 },
       ]),
 
       // Recent insights for prediction log
@@ -151,13 +215,32 @@ const getPlatformStats = async (req, res, next) => {
     const recMap = {};
     recommendationBreakdown.forEach(({ _id, count }) => { if (_id) recMap[_id] = count; });
 
+    // Sport activity → keyed lookup for easy client consumption
+    const sportActivity = {};
+    (sportBreakdown || []).forEach(({ _id, insights, unlocks }) => {
+      if (_id) sportActivity[_id] = { insights: insights || 0, unlocks: unlocks || 0 };
+    });
+
+    // Top players → flatten the compound _id for the frontend
+    const topPlayersList = (topPlayers || []).map((row) => ({
+      playerName: row?._id?.playerName || 'Unknown',
+      sport:      row?._id?.sport || null,
+      unlocks:    row.unlocks   || 0,
+      insights:   row.insights || 0,
+    }));
+
+    // USD conversion helper — cents → dollars string
+    const toUSD = (cents) => ((cents || 0) / 100).toFixed(2);
+
     res.status(HTTP_STATUS.OK).json({
       success: true,
       stats: {
         users: {
           total: totalUsers,
+          verified: verifiedUsersCount,
           newToday: newUsersToday,
           newThisWeek: newUsersThisWeek,
+          newThisMonth: newUsersThisMonth,
         },
         insights: {
           total: totalInsights,
@@ -184,12 +267,21 @@ const getPlatformStats = async (req, res, next) => {
         },
         economy: {
           totalCreditsSpent: totalCreditsSpent[0]?.total || 0,
-          totalRevenueUSD: ((totalRevenueCents[0]?.total || 0) / 100).toFixed(2),
+          creditsHeldByUsers: creditsHeldAggregate[0]?.total || 0,
+          totalRevenueUSD:    toUSD(totalRevenueCents[0]?.total),
+          revenueTodayUSD:    toUSD(revenueTodayCents[0]?.total),
+          revenueThisWeekUSD: toUSD(revenueThisWeekCents[0]?.total),
+          purchasesTotal:     purchasesTotalCount || 0,
+          purchasesToday:     purchasesTodayCount || 0,
+          refundsTotal:       refundsTotalCount   || 0,
+          refundsTotalUSD:    toUSD(refundsTotalCents[0]?.total),
         },
         live: {
           availableProps: activePropsCount,
           scheduledGames: scheduledGamesCount,
         },
+        sportActivity,
+        topPlayers: topPlayersList,
         outcomes: outcomesSummary,
         // Recent prediction log
         recentInsights,
