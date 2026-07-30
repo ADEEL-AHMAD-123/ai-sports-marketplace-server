@@ -206,6 +206,53 @@ const SOCCER_TEAMS = {
   'West Ham':                { id: 48, abbr: 'whu' },
   'Wolverhampton Wanderers': { id: 39, abbr: 'wol' },
   'Wolves':                  { id: 39, abbr: 'wol' },
+
+  // ─── MLS (US/Canada) ──────────────────────────────────────────────────
+  // Abbreviations chosen to match MLS's official 3-letter codes so
+  // "New York City FC" ≠ "New England Revolution" (both were falling into
+  // the name.slice(0,3) fallback and colliding as "NEW"). Alt names cover
+  // the variants The Odds API returns (with/without "FC", "CF", "SC", etc).
+  'Atlanta United FC':       { abbr: 'atl' },
+  'Atlanta United':          { abbr: 'atl' },
+  'Austin FC':               { abbr: 'atx' },
+  'Charlotte FC':            { abbr: 'clt' },
+  'Chicago Fire FC':         { abbr: 'chi' },
+  'Chicago Fire':            { abbr: 'chi' },
+  'FC Cincinnati':           { abbr: 'cin' },
+  'Colorado Rapids':         { abbr: 'col' },
+  'Columbus Crew':           { abbr: 'clb' },
+  'Columbus Crew SC':        { abbr: 'clb' },
+  'D.C. United':             { abbr: 'dc'  },
+  'DC United':               { abbr: 'dc'  },
+  'FC Dallas':               { abbr: 'dal' },
+  'Houston Dynamo FC':       { abbr: 'hou' },
+  'Houston Dynamo':          { abbr: 'hou' },
+  'Los Angeles FC':          { abbr: 'lafc' },
+  'LAFC':                    { abbr: 'lafc' },
+  'LA Galaxy':               { abbr: 'lag' },
+  'Los Angeles Galaxy':      { abbr: 'lag' },
+  'Minnesota United FC':     { abbr: 'min' },
+  'Minnesota United':        { abbr: 'min' },
+  'CF Montreal':             { abbr: 'mtl' },
+  'Montreal Impact':         { abbr: 'mtl' },
+  'Nashville SC':            { abbr: 'nsh' },
+  'New England Revolution':  { abbr: 'ne'  },
+  'New York City FC':        { abbr: 'nyc' },
+  'New York Red Bulls':      { abbr: 'nyr' },
+  'Orlando City SC':         { abbr: 'orl' },
+  'Orlando City':            { abbr: 'orl' },
+  'Philadelphia Union':      { abbr: 'phi' },
+  'Portland Timbers':        { abbr: 'por' },
+  'Real Salt Lake':          { abbr: 'rsl' },
+  'San Jose Earthquakes':    { abbr: 'sj'  },
+  'Seattle Sounders FC':     { abbr: 'sea' },
+  'Seattle Sounders':        { abbr: 'sea' },
+  'Sporting Kansas City':    { abbr: 'skc' },
+  'Sporting KC':             { abbr: 'skc' },
+  'St. Louis City SC':       { abbr: 'stl' },
+  'St Louis City SC':        { abbr: 'stl' },
+  'Vancouver Whitecaps FC':  { abbr: 'van' },
+  'Vancouver Whitecaps':     { abbr: 'van' },
 };
 
 // ─── Lookup helpers ───────────────────────────────────────────────────────────
@@ -220,12 +267,37 @@ const TEAM_MAPS = { nba: NBA_TEAMS, mlb: MLB_TEAMS, nhl: NHL_TEAMS, nfl: NFL_TEA
  */
 const getTeamId = (sport, name) => TEAM_MAPS[sport]?.[name]?.id || null;
 
+// Track which fallback abbreviations we've already warned about so we don't
+// spam the logs on every single game/prop cycle.
+const _unmappedAbbrWarned = new Set();
+
 /**
  * Get team abbreviation (uppercase) from full team name.
+ *
+ * If the team isn't in the sport's map, this falls back to slice(0,3) of
+ * the name — that fallback is collision-prone ("New York City FC" and
+ * "New England Revolution" both slice to "NEW"), so we emit a one-time
+ * warning per unmapped team so ops can add it to the map.
  */
 const getTeamAbbr = (sport, name) => {
   const abbr = TEAM_MAPS[sport]?.[name]?.abbr;
-  return abbr ? abbr.toUpperCase() : (name?.slice(0,3).toUpperCase() || '???');
+  if (abbr) return abbr.toUpperCase();
+
+  const fallback = name?.slice(0, 3).toUpperCase() || '???';
+  const warnKey = `${sport}:${name}`;
+  if (name && !_unmappedAbbrWarned.has(warnKey)) {
+    _unmappedAbbrWarned.add(warnKey);
+    // Deferred require to avoid a config→logger circular dep at load time.
+    try {
+      const logger = require('../../config/logger');
+      logger.warn(
+        `[teamMaps] ${sport} team "${name}" is not in the abbreviation map — ` +
+        `falling back to slice "${fallback}" (may collide with other teams). ` +
+        `Add it to teamMaps.js.`
+      );
+    } catch { /* ignore — never throw from a formatting helper */ }
+  }
+  return fallback;
 };
 
 /**
