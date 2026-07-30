@@ -39,14 +39,35 @@ async function run() {
   // Engaged games (insights / recent views) earn the fast 10-min cadence.
   const engagedEventIds = await getEngagedEventIds(games, now);
 
-  let totalUpserted = 0;
+  // Diagnostic counters so a "Done — 0 props" outcome can be traced to a
+  // specific reason without adding logs after the fact.
+  let totalUpserted   = 0;
+  let skippedByPolicy = 0;   // shouldFetchPropsForGame returned false
+  let skippedEmpty    = 0;   // adapter returned [] (empty markets OR quota-safe skip)
+  let attempted       = 0;   // fetch calls actually made
 
   for (const game of games) {
     const engaged = engagedEventIds.has(String(game.oddsEventId));
-    if (!shouldFetchPropsForGame(game, now, { engaged })) continue;
+    if (!shouldFetchPropsForGame(game, now, { engaged })) {
+      skippedByPolicy += 1;
+      continue;
+    }
 
+    attempted += 1;
     const rawProps = await adapter.fetchProps(game.oddsEventId);
-    if (!rawProps.length) continue;
+    if (!rawProps.length) {
+      // Empty response — could be "sportsbook has no markets right now"
+      // (in-play, mid-inning, closed early) OR the adapter quota-safed the
+      // call. Mark the game so the frontend chip stays honest ("Lines
+      // Pending") AND set propsLastFetchedAt so we don't hammer the API
+      // during a run where quota is exhausted.
+      await Game.findByIdAndUpdate(game._id, {
+        hasProps: false,
+        propsLastFetchedAt: new Date(),
+      });
+      skippedEmpty += 1;
+      continue;
+    }
 
     const injuryMap = await MLBInjuryService.getInjuryMap({
       homeTeamName: game.homeTeam?.name,
@@ -102,8 +123,27 @@ async function run() {
     }
   }
 
-  logger.info(`✅ [${SPORT}PropWatcher] Done — ${totalUpserted} props`);
-  return { upserted: totalUpserted };
+  // Rich Done line — with counters you can immediately tell whether a
+  // 0-upsert result was "policy skipped everything", "quota exhausted",
+  // "The Odds API had no markets", or a real successful upsert.
+  const quotaRemaining = Number.isFinite(adapter.oddsApiQuotaRemaining)
+    ? adapter.oddsApiQuotaRemaining
+    : 'unknown';
+  logger.info(
+    `✅ [${SPORT}PropWatcher] Done — ${totalUpserted} props ` +
+    `(games=${games.length}, attempted=${attempted}, ` +
+    `skippedByPolicy=${skippedByPolicy}, skippedEmpty=${skippedEmpty}, ` +
+    `engaged=${engagedEventIds.size}, oddsApiQuotaRemaining=${quotaRemaining})`
+  );
+  return {
+    upserted: totalUpserted,
+    games: games.length,
+    attempted,
+    skippedByPolicy,
+    skippedEmpty,
+    engaged: engagedEventIds.size,
+    oddsApiQuotaRemaining: quotaRemaining,
+  };
 }
 
 async function _invalidateMovedLines(oddsEventId, rawProps, adapter) {
