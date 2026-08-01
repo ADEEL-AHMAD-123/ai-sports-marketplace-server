@@ -339,27 +339,48 @@ class StrategyService {
       ? scoring.highConfidenceThreshold
       : HC_THRESHOLD;
 
-    const { recentStatValues = [], focusStatAvg = 0, baselineGamesCount = 30 } = processedStats || {};
-    const parsedFocus = parseFloat(focusStatAvg);
+    // ── Input hardening ────────────────────────────────────────────────
+    // Filter recentStatValues to real numbers so a bad row upstream
+    // (undefined, null, NaN, string) can't corrupt mean/variance.
+    const rawRecent = Array.isArray(processedStats?.recentStatValues)
+      ? processedStats.recentStatValues
+      : [];
+    const recentStatValues = rawRecent.filter((v) => Number.isFinite(v));
+
+    const parsedFocus = parseFloat(processedStats?.focusStatAvg);
     const hasFocusAvg = Number.isFinite(parsedFocus);
     const focusAvgNum = hasFocusAvg ? parsedFocus : 0;
 
-    // Edge percentage
-    const rawEdge = bettingLine > 0 && hasFocusAvg
-      ? ((focusAvgNum - bettingLine) / bettingLine) * 100
+    const parsedBaseline = parseFloat(processedStats?.baselineGamesCount);
+    const baselineGamesCount = Number.isFinite(parsedBaseline) ? parsedBaseline : 30;
+
+    const parsedLine = parseFloat(bettingLine);
+    const safeLine   = Number.isFinite(parsedLine) && parsedLine > 0 ? parsedLine : 0;
+
+    // ── Edge percentage ────────────────────────────────────────────────
+    // Edge is only meaningful when we have both a positive line AND a valid
+    // focus average. Otherwise edge = 0 so downstream flags don't misfire.
+    const rawEdge = (safeLine > 0 && hasFocusAvg)
+      ? ((focusAvgNum - safeLine) / safeLine) * 100
       : 0;
-    const edgePercentage = isNaN(rawEdge) ? 0 : parseFloat(rawEdge.toFixed(2));
+    const edgePercentage = Number.isFinite(rawEdge) ? parseFloat(rawEdge.toFixed(2)) : 0;
     const absEdge        = Math.abs(edgePercentage);
 
-    // Confidence score
+    // ── Confidence: sport-aware guards ─────────────────────────────────
+    // The DEFAULT variance guard is calibrated for consistent-log sports
+    // (NBA/NFL passing yards). MLB / NHL / Soccer override with looser
+    // tolerances via leagueProfile.scoring.varianceGuard. See leagueProfiles.js
+    // for the per-sport rationale.
+    const caps = this._resolveVarianceCaps(scoring.varianceGuard);
+
     let confidenceScore;
     if (recentStatValues.length > 0) {
-      const direction    = focusAvgNum >= bettingLine ? 'over' : 'under';
+      const direction    = focusAvgNum >= safeLine ? 'over' : 'under';
       const total        = recentStatValues.length;
-      const maxWeight    = Number.isFinite(confidenceCfg.maxWeight) ? confidenceCfg.maxWeight : 1.4;
+      const maxWeight    = Number.isFinite(confidenceCfg.maxWeight)    ? confidenceCfg.maxWeight    : 1.4;
       const strongWeight = Number.isFinite(confidenceCfg.strongWeight) ? confidenceCfg.strongWeight : 1.4;
       const normalWeight = Number.isFinite(confidenceCfg.normalWeight) ? confidenceCfg.normalWeight : 1.0;
-      const weakWeight   = Number.isFinite(confidenceCfg.weakWeight) ? confidenceCfg.weakWeight : 0.7;
+      const weakWeight   = Number.isFinite(confidenceCfg.weakWeight)   ? confidenceCfg.weakWeight   : 0.7;
       const strongMarginCap = Number.isFinite(confidenceCfg.strongMarginCap) ? confidenceCfg.strongMarginCap : 2.0;
       const normalMarginCap = Number.isFinite(confidenceCfg.normalMarginCap) ? confidenceCfg.normalMarginCap : 0.5;
       const normalMarginLineFactor = Number.isFinite(confidenceCfg.normalMarginLineFactor)
@@ -367,45 +388,34 @@ class StrategyService {
         : 0.5;
 
       // Line-scaled margins — sport-specific caps come from league profiles.
-      const strongMargin = Math.min(strongMarginCap, bettingLine);
-      const normalMargin = Math.min(normalMarginCap, bettingLine * normalMarginLineFactor);
+      const strongMargin = Math.min(strongMarginCap, safeLine);
+      const normalMargin = Math.min(normalMarginCap, safeLine * normalMarginLineFactor);
       const weightedHits = recentStatValues.reduce((sum, val) => {
-        const margin = direction === 'over' ? val - bettingLine : bettingLine - val;
+        const margin = direction === 'over' ? val - safeLine : safeLine - val;
         if (margin <= 0) return sum;
         return sum + (margin >= strongMargin ? strongWeight : margin >= normalMargin ? normalWeight : weakWeight);
       }, 0);
 
-      // Variance detection: if game log has zeros or very high variance, reduce confidence
-      const hasZeroValue = recentStatValues.some(v => v === 0);
-      const mean = recentStatValues.length > 0
-        ? recentStatValues.reduce((s, v) => s + v, 0) / recentStatValues.length
+      const stats = this._computeVarianceStats(recentStatValues);
+      const denom = total * maxWeight;
+      let baseConfidence = denom > 0
+        ? Math.min(99, Math.max(0, Math.round((weightedHits / denom) * 100)))
         : 0;
-      const variance = recentStatValues.length > 1
-        ? recentStatValues.reduce((sq, v) => sq + Math.pow(v - mean, 2), 0) / recentStatValues.length
-        : 0;
-      const stdDev = Math.sqrt(variance);
-      const cv = mean > 0 ? stdDev / mean : 0; // coefficient of variation
 
-      // If high variance in recent window, cap confidence lower
-      let baseConfidence = Math.min(99, Math.round((weightedHits / (total * maxWeight)) * 100));
-      if (hasZeroValue || cv > 0.4) {
-        baseConfidence = Math.min(baseConfidence, 50);
-      }
-      // Weak edge (<5%) cannot have high confidence, even with strong game log
-      if (absEdge < 5) {
-        baseConfidence = Math.min(baseConfidence, 55);
-      }
-      // Zero/near-zero edge (<0.5%) is no edge at all — cap severely
-      if (absEdge < 0.5) {
-        baseConfidence = Math.min(baseConfidence, 30);
-      }
-      // Thin baseline (<20 games): cap at 80 — not enough data to be extremely confident
-      if (baselineGamesCount < 20) {
-        baseConfidence = Math.min(baseConfidence, 80);
-      }
+      baseConfidence = this._applyConfidenceCaps(baseConfidence, {
+        hasZeroValue:       stats.hasZeroValue,
+        cv:                 stats.cv,
+        absEdge,
+        baselineGamesCount,
+        caps,
+      });
       confidenceScore = baseConfidence;
     } else {
-      confidenceScore = this._edgeToConfidence(absEdge, context);
+      // No recent log — fall back to pure edge-tier confidence, but still
+      // apply the sport-agnostic edge caps so a zero-edge prop can't be HC.
+      let base = this._edgeToConfidence(absEdge, context);
+      base = this._applyEdgeOnlyCaps(base, absEdge);
+      confidenceScore = base;
     }
 
     return {
@@ -426,29 +436,92 @@ class StrategyService {
       : HC_THRESHOLD;
 
     const avg = parseFloat(focusStatAvg);
-    if (!Number.isFinite(avg) || !bettingLine) return null;
+    const parsedLine = parseFloat(bettingLine);
+    if (!Number.isFinite(avg) || !Number.isFinite(parsedLine) || parsedLine <= 0) return null;
 
-    const rawEdge        = ((avg - bettingLine) / bettingLine) * 100;
-    const edgePercentage = parseFloat(rawEdge.toFixed(2));
+    const rawEdge        = ((avg - parsedLine) / parsedLine) * 100;
+    const edgePercentage = Number.isFinite(rawEdge) ? parseFloat(rawEdge.toFixed(2)) : 0;
     const absEdge        = Math.abs(edgePercentage);
     let confidenceScore = this._edgeToConfidence(absEdge, context);
-    
-    // Weak edge (<5%) cannot have high confidence
-    if (absEdge < 5) {
-      confidenceScore = Math.min(confidenceScore, 55);
-    }
-    // Zero/near-zero edge (<0.5%) is no edge at all — cap severely
-    if (absEdge < 0.5) {
-      confidenceScore = Math.min(confidenceScore, 30);
-    }
+    confidenceScore = this._applyEdgeOnlyCaps(confidenceScore, absEdge);
 
     return {
       edgePercentage,
       confidenceScore,
       // Guardrail: weak edge (<5%) cannot be HC
-      isHighConfidence: confidenceScore >= highConfidenceThreshold && Math.abs(edgePercentage) >= 5,
+      isHighConfidence: confidenceScore >= highConfidenceThreshold && absEdge >= 5,
       isBestValue:      absEdge >= getMinEdgeForStat(context?.sport, context?.statType),
     };
+  }
+
+  // ─── Helpers extracted from _computeScores ────────────────────────────
+  //
+  // Kept as instance methods (not module-level helpers) so `this` stays
+  // available if we ever want to add per-sport hooks. All are pure — no
+  // I/O, no state. Unit-testable in isolation.
+
+  /**
+   * Resolve variance-guard caps from a sport's leagueProfile config, falling
+   * back to defaults calibrated for consistent-log sports (NBA points, NFL
+   * passing yards). See leagueProfiles.js DEFAULT_VARIANCE_GUARD comment.
+   */
+  _resolveVarianceCaps(varianceCfg = {}) {
+    return {
+      zeroValueCap:       Number.isFinite(varianceCfg.zeroValueCap)       ? varianceCfg.zeroValueCap       : 50,
+      cvThreshold:        Number.isFinite(varianceCfg.cvThreshold)        ? varianceCfg.cvThreshold        : 0.4,
+      cvOverThresholdCap: Number.isFinite(varianceCfg.cvOverThresholdCap) ? varianceCfg.cvOverThresholdCap : 50,
+      thinBaselineGames:  Number.isFinite(varianceCfg.thinBaselineGames)  ? varianceCfg.thinBaselineGames  : 20,
+      thinBaselineCap:    Number.isFinite(varianceCfg.thinBaselineCap)    ? varianceCfg.thinBaselineCap    : 80,
+    };
+  }
+
+  /**
+   * Compute mean / stdDev / CV / hasZeroValue for a finite-value array.
+   * Guards against zero-length and single-value arrays (variance = 0 in
+   * those cases so CV becomes 0 and won't trigger any cap).
+   */
+  _computeVarianceStats(values) {
+    const total = values.length;
+    if (total === 0) return { mean: 0, stdDev: 0, cv: 0, hasZeroValue: false };
+
+    const hasZeroValue = values.some(v => v === 0);
+    const mean = values.reduce((s, v) => s + v, 0) / total;
+    const variance = total > 1
+      ? values.reduce((sq, v) => sq + Math.pow(v - mean, 2), 0) / total
+      : 0;
+    const stdDev = Math.sqrt(variance);
+    const cv = mean > 0 ? stdDev / mean : 0;
+    return { mean, stdDev, cv, hasZeroValue };
+  }
+
+  /**
+   * Apply the full set of confidence caps to a base score. Every cap uses
+   * Math.min so the order is irrelevant — the final value is always the
+   * TIGHTEST applicable ceiling. All caps are pure functions of the inputs.
+   *
+   * The two sport-agnostic edge caps (5% / 0.5%) live inside this helper
+   * so both scoring paths (with-log and edge-only) apply the same logic.
+   */
+  _applyConfidenceCaps(baseConfidence, { hasZeroValue, cv, absEdge, baselineGamesCount, caps }) {
+    let score = baseConfidence;
+    if (hasZeroValue)                 score = Math.min(score, caps.zeroValueCap);
+    if (cv > caps.cvThreshold)        score = Math.min(score, caps.cvOverThresholdCap);
+    if (absEdge < 5)                  score = Math.min(score, 55);
+    if (absEdge < 0.5)                score = Math.min(score, 30);
+    if (baselineGamesCount < caps.thinBaselineGames) score = Math.min(score, caps.thinBaselineCap);
+    return score;
+  }
+
+  /**
+   * Edge-only caps — used both by _computeEdgeOnlyScores AND by the
+   * no-recent-log path in _computeScores. Enforces "weak/no edge cannot
+   * be HC" regardless of what tier the edge lookup produced.
+   */
+  _applyEdgeOnlyCaps(baseConfidence, absEdge) {
+    let score = baseConfidence;
+    if (absEdge < 5)   score = Math.min(score, 55);
+    if (absEdge < 0.5) score = Math.min(score, 30);
+    return score;
   }
 
   _edgeToConfidence(absEdge, context = {}) {

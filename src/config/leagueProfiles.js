@@ -24,6 +24,23 @@
  *   - goals/assists (NHL) high variance → higher threshold required
  */
 
+// ── Variance-guard defaults ───────────────────────────────────────────────
+// These caps reduce confidence when a player's recent log looks noisy.
+// The DEFAULT values are calibrated for NBA/NFL where zero-value games are
+// unusual and CV > 0.4 is a real red flag. MLB overrides both (baseball
+// has zeros in ~30% of at-bat outcomes and CV in the 0.8-1.2 range is
+// normal, not a signal problem) so it doesn't self-cap below the HC bar.
+const DEFAULT_VARIANCE_GUARD = {
+  // If ANY value in recentStatValues is zero, cap confidence at this ceiling.
+  zeroValueCap:      50,
+  // If coefficient of variation exceeds this, cap confidence at cvOverThresholdCap.
+  cvThreshold:       0.4,
+  cvOverThresholdCap: 50,
+  // Confidence ceiling when we have fewer than 20 baseline games.
+  thinBaselineGames: 20,
+  thinBaselineCap:   80,
+};
+
 const DEFAULT_PROFILE = {
   scoring: {
     highConfidenceThreshold: 57,
@@ -37,6 +54,7 @@ const DEFAULT_PROFILE = {
       normalMarginCap:        0.5,
       normalMarginLineFactor: 0.5,
     },
+    varianceGuard: DEFAULT_VARIANCE_GUARD,
     edgeToConfidenceTiers: [
       { minAbsEdge: 20, score: 80 },
       { minAbsEdge: 12, score: 65 },
@@ -62,6 +80,20 @@ const LEAGUE_PROFILES = {
         threes:         8,
         points_assists: 8,
         default:        8,
+      },
+      // NBA-specific variance guard.
+      //   • Star point-scorers have CV ~0.25-0.35 (very consistent).
+      //   • Role players' rebounds/assists/threes push CV to 0.4-0.7.
+      //   • Zero-value games happen for role players in rebounds/assists/
+      //     threes but are rare for a starter's point total.
+      // The default 0.4 CV threshold would over-penalise every role-player
+      // prop; 0.55 lets steady scorers pass while still flagging noise.
+      varianceGuard: {
+        zeroValueCap:      55,
+        cvThreshold:       0.55,
+        cvOverThresholdCap: 55,
+        thinBaselineGames: 12,
+        thinBaselineCap:   80,
       },
       confidence: {
         maxWeight:              1.4,
@@ -89,6 +121,21 @@ const LEAGUE_PROFILES = {
       // RBIs are most volatile (team-dependent) → higher default threshold
       // Applied via per-stat overrides below
       minEdgePercentage: 15,
+      // MLB-specific variance guard — the DEFAULT caps confidence at 50 the
+      // moment a stat log contains any zero OR CV > 0.4. Both are normal in
+      // baseball (batter goes 0-fer ~30% of games; CV on hits/rbis/runs is
+      // typically 0.8-1.2) so the default effectively pinned MLB confidence
+      // at 50 for every batter → HC (threshold 57) was unreachable.
+      // We relax both so HC actually fires on genuinely strong signals:
+      //   • Zero-value only caps at 65 (still a soft penalty)
+      //   • CV threshold raised to 1.0 before penalty applies
+      varianceGuard: {
+        zeroValueCap:      65,
+        cvThreshold:       1.0,
+        cvOverThresholdCap: 55,
+        thinBaselineGames: 15,   // pitchers have thinner logs → lower minimum
+        thinBaselineCap:   80,
+      },
       minGamesByStatType: {
         hits:               10,
         total_bases:        10,
@@ -137,6 +184,20 @@ const LEAGUE_PROFILES = {
         points:        7,
         default:       6,
       },
+      // NHL-specific variance guard.
+      //   • shots_on_goal: CV ~0.4-0.7 for top forwards; zeros unusual.
+      //   • goals/assists: avg 0.3-0.7 per game, CV routinely 1.0-1.5, and
+      //     zero-value games occur in 60-70% of appearances even for elite
+      //     scorers. The default (zeroValueCap 50, cvThreshold 0.4) makes
+      //     HC unreachable for goals/assists.
+      // Similar profile to MLB — tolerate goals-are-rare-events variance.
+      varianceGuard: {
+        zeroValueCap:      65,
+        cvThreshold:       1.2,
+        cvOverThresholdCap: 55,
+        thinBaselineGames: 12,
+        thinBaselineCap:   80,
+      },
       confidence: {
         maxWeight:              1.4,
         strongWeight:           1.4,
@@ -178,6 +239,20 @@ const LEAGUE_PROFILES = {
         rush_reception_yards: 4,
         default: 4,
       },
+      // NFL-specific variance guard.
+      //   • Passing yards for a starter: CV ~0.2-0.3 (extremely consistent).
+      //   • Rushing/receiving yards: CV ~0.4-0.7 (usage-driven variance).
+      //   • Touchdowns: CV ~0.6-1.5; zero-TD games are the majority for RBs.
+      //   • Season is only 17 games — a "thin baseline" ceiling of 20 games
+      //     was mathematically impossible in NFL; capping at 6 lets the
+      //     model fully trust a mid-season sample.
+      varianceGuard: {
+        zeroValueCap:      60,
+        cvThreshold:       0.8,
+        cvOverThresholdCap: 55,
+        thinBaselineGames: 6,
+        thinBaselineCap:   85,
+      },
       confidence: {
         maxWeight:              1.4,
         strongWeight:           1.4,
@@ -213,6 +288,20 @@ const LEAGUE_PROFILES = {
         assists: 5,
         shots_on_target: 5,
         default: 5,
+      },
+      // Soccer-specific variance guard — the MOST zero-heavy sport we cover.
+      //   • Goals: avg 0.2-0.6 per game, CV 1.5-3.0. Even top scorers score
+      //     in only 30-40% of appearances → 60-70% zero-value games.
+      //   • Assists: nearly identical profile to goals.
+      //   • Shots on target: avg 0.5-1.5, CV 0.8-1.5, zeros common.
+      // Default caps would make HC unreachable for any scorer prop; we set
+      // the loosest tolerances of any sport here.
+      varianceGuard: {
+        zeroValueCap:      70,
+        cvThreshold:       1.5,
+        cvOverThresholdCap: 60,
+        thinBaselineGames: 5,
+        thinBaselineCap:   85,
       },
       confidence: {
         maxWeight:              1.4,
