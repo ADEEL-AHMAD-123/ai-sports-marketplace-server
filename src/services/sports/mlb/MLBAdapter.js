@@ -107,9 +107,27 @@ class MLBAdapter extends BaseAdapter {
       return props;
     } catch (err) {
       const status = err.response?.status;
-      if (status === 401 || status === 422) {
-        logger.error(`🔑 [MLB] Odds API ${status} — quota exhausted`);
+      // 401 = auth failure (key invalid, revoked, or fully quota-drained on
+      // The Odds API side — they return 401 for all three). 422 = the request
+      // params were rejected (usually a market/region combo not offered for
+      // this event). Both make the call unusable this cycle, but they mean
+      // very different things operationally, so log them differently.
+      if (status === 401) {
+        logger.error(
+          '🔑 [MLB] Odds API 401 — key is invalid, revoked, or the monthly ' +
+          'quota is 100% exhausted. Check the-odds-api.com/account and either ' +
+          'rotate the key (update THE_ODDS_API_KEY on Railway and restart) or ' +
+          'upgrade the plan tier. Marking adapter quota-safe until restart.'
+        );
         this.oddsApiQuotaRemaining = 0;
+        return [];
+      }
+      if (status === 422) {
+        logger.warn(
+          `⚠️  [MLB] Odds API 422 for event ${oddsEventId} — markets/regions ` +
+          'combo not offered by this event. Not a quota problem; other games ' +
+          'this cycle will still be attempted.'
+        );
         return [];
       }
       logger.error('❌ [MLB] fetchProps failed', { oddsEventId, error: err.message });
@@ -233,8 +251,25 @@ class MLBAdapter extends BaseAdapter {
   // ─── Internals ─────────────────────────────────────────────────────────────
 
   _extractProps(eventData, oddsEventId) {
-    const props = [];
+    // Two-pass strategy: collect props per bookmaker separately, then keep
+    // the single bookmaker with the deepest coverage for THIS game.
+    //
+    // Why not just take the union across all books? Because the same
+    // (playerName, statType) prop appears at multiple books with different
+    // lines/odds, and downstream we upsert with (eventId, playerName,
+    // statType) as the composite key — so the LAST book processed silently
+    // overwrites earlier ones. Users would then see a mix of lines from
+    // different books which they can't act on (they bet at one book at a
+    // time). Single-book-per-game keeps every prop internally consistent.
+    //
+    // Selection rule: bookmaker with the highest prop count wins. Ties
+    // are broken by preferring DraftKings (widest US market coverage and
+    // most reliable line updates near game time). Falls back to whoever
+    // has anything if no book has full coverage.
+    const perBook = new Map(); // bkTitle → { props, isDK }
+
     for (const bk of eventData?.bookmakers || []) {
+      const collected = [];
       for (const market of bk.markets || []) {
         const statType = MLB_MARKET_MAP[market.key];
         if (!statType || !VALID_MLB_STAT_TYPES.has(statType)) continue;
@@ -242,17 +277,33 @@ class MLBAdapter extends BaseAdapter {
         const byPlayer = {};
         for (const o of market.outcomes || []) {
           const pn = o.description;
-          if (!byPlayer[pn]) byPlayer[pn] = { playerName:pn, statType, bookmaker:bk.title, oddsEventId };
+          if (!byPlayer[pn]) byPlayer[pn] = { playerName: pn, statType, bookmaker: bk.title, oddsEventId };
           if (o.name === 'Over')  { byPlayer[pn].line = o.point; byPlayer[pn].overOdds  = o.price; }
           if (o.name === 'Under') { byPlayer[pn].underOdds = o.price; }
         }
         for (const p of Object.values(byPlayer)) {
-          if (p.line !== undefined && p.overOdds !== undefined) props.push(p);
+          if (p.line !== undefined && p.overOdds !== undefined) collected.push(p);
         }
       }
-      if (props.length > 0 && bk.title === 'DraftKings') break;
+      if (collected.length > 0) {
+        perBook.set(bk.title, { props: collected, isDK: bk.title === 'DraftKings' });
+      }
     }
-    return props;
+
+    if (!perBook.size) return [];
+
+    // Pick the book with the most props; DK wins ties.
+    let winner = null;
+    for (const [title, entry] of perBook) {
+      if (!winner) { winner = { title, ...entry }; continue; }
+      if (entry.props.length > winner.props.length) {
+        winner = { title, ...entry };
+      } else if (entry.props.length === winner.props.length && entry.isDK) {
+        winner = { title, ...entry };
+      }
+    }
+
+    return winner.props;
   }
 
   _trackQuota(headers) {
