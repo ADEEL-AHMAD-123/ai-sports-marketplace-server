@@ -436,7 +436,27 @@ const triggerCronJob = async (req, res, next) => {
       'post-game-sync-nfl': ['../jobs/sports/nfl/postGameSync',           'run'],
       'post-game-sync-nhl': ['../jobs/sports/nhl/postGameSync',           'run'],
       'post-game-sync-soccer': ['../jobs/sports/soccer/postGameSync',     'run'],
+      // Direct scoring passes. These call StrategyService.scoreAllPropsForSport
+      // synchronously via the __direct handler below, bypassing BullMQ so they
+      // work even when the scoring worker is down. Use these when HC/BV badges
+      // aren't showing to force a re-score right now.
+      'score-nba':          ['__direct', 'scoreNBA'],
+      'score-mlb':          ['__direct', 'scoreMLB'],
+      'score-nhl':          ['__direct', 'scoreNHL'],
+      'score-nfl':          ['__direct', 'scoreNFL'],
+      'score-soccer':       ['__direct', 'scoreSoccer'],
       'ai-log-cleanup':     ['../jobs/orchestrators/postGameSync.job',    'runAILogCleanup'],
+    };
+
+    // Direct in-process handlers (no separate file). Used by the score-*
+    // entries above. Keeps the routing table declarative but doesn't require
+    // creating N one-line job files.
+    const DIRECT_HANDLERS = {
+      scoreNBA:    () => require('../services/StrategyService').scoreAllPropsForSport('nba'),
+      scoreMLB:    () => require('../services/StrategyService').scoreAllPropsForSport('mlb'),
+      scoreNHL:    () => require('../services/StrategyService').scoreAllPropsForSport('nhl'),
+      scoreNFL:    () => require('../services/StrategyService').scoreAllPropsForSport('nfl'),
+      scoreSoccer: () => require('../services/StrategyService').scoreAllPropsForSport('soccer'),
     };
 
     const jobEntry = JOB_MAP[job];
@@ -448,8 +468,13 @@ const triggerCronJob = async (req, res, next) => {
     }
 
     const [modulePath, fnName] = jobEntry;
-    const jobModule = require(modulePath);
-    const fn = jobModule[fnName];
+    let fn;
+    if (modulePath === '__direct') {
+      fn = DIRECT_HANDLERS[fnName];
+    } else {
+      const jobModule = require(modulePath);
+      fn = jobModule[fnName];
+    }
 
     if (typeof fn !== 'function') {
       throw new AppError(`Job module loaded but "${fnName}" is not a function`, 500);

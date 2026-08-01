@@ -109,9 +109,13 @@ class StrategyService {
     const groupedFetches = new Map();
     const updateOps = [];
 
-    let scored  = 0;
-    let failed  = 0;
-    let noStats = 0;
+    let scored          = 0;
+    let failed          = 0;
+    let noStats         = 0;
+    let hcTagged        = 0;   // props that ended up isHighConfidence: true
+    let bvTagged        = 0;   // props that ended up isBestValue: true
+    let hiddenInsufficientGames = 0;
+    let hiddenNoStats           = 0;
 
     for (const prop of props) {
       const spec = this._buildStatsFetchSpec(sport, prop);
@@ -119,6 +123,11 @@ class StrategyService {
         const noStatsUpdate = this._buildNoStatsUpdate(prop, now);
         updateOps.push(noStatsUpdate);
         noStats++;
+        // If the noStats path resolved to a hide (no fallback avg → isAvailable:false)
+        // that's user-visible — count it separately so the admin can see the reason.
+        if (noStatsUpdate?.updateOne?.update?.$set?.isAvailable === false) {
+          hiddenNoStats++;
+        }
         continue;
       }
 
@@ -157,8 +166,12 @@ class StrategyService {
       for (const prop of group.props) {
         try {
           if (!stats?.length) {
-            updateOps.push(this._buildNoStatsUpdate(prop, now));
+            const noStatsUpdate = this._buildNoStatsUpdate(prop, now);
+            updateOps.push(noStatsUpdate);
             noStats++;
+            if (noStatsUpdate?.updateOne?.update?.$set?.isAvailable === false) {
+              hiddenNoStats++;
+            }
             continue;
           }
 
@@ -170,6 +183,7 @@ class StrategyService {
                 update: { $set: { isAvailable: false, lastScoredAt: now } },
               },
             });
+            hiddenInsufficientGames++;
             logger.info(`[StrategyService] Hidden — only ${stats.length} games (need ${minGames})`, {
               playerName: prop.playerName,
             });
@@ -185,6 +199,9 @@ class StrategyService {
             sport: prop.sport,
             statType: prop.statType,
           });
+
+          if (scores?.isHighConfidence) hcTagged++;
+          if (scores?.isBestValue)      bvTagged++;
 
           updateOps.push({
             updateOne: {
@@ -206,8 +223,18 @@ class StrategyService {
 
     await this._flushBulkOps(updateOps);
 
-    logger.info(`✅ [StrategyService] Scoring complete for ${sport}`, { scored, failed, noStats });
-    return { scored, failed, noStats };
+    const summary = {
+      scored,
+      failed,
+      noStats,
+      hcTagged,
+      bvTagged,
+      hiddenInsufficientGames,
+      hiddenNoStats,
+      totalConsidered: props.length,
+    };
+    logger.info(`✅ [StrategyService] Scoring complete for ${sport}`, summary);
+    return summary;
   }
 
   _buildStatsFetchSpec(sport, prop) {
