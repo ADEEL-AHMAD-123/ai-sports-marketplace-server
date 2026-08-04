@@ -6,16 +6,33 @@ const { cacheGet, cacheSet } = require('../../../config/redis');
 const { applySoccerFormulas, buildSoccerPrompt } = require('./SoccerFormulas');
 const { getTeamId, getTeamAbbr, getTeamLogoUrl, getApiSportsLogoUrl } = require('../../shared/teamMaps');
 
+// Per-league config.
+//   • `region`       — the human country label (used in logs / UI).
+//   • `oddsRegions`  — the Odds API `regions` param to send when fetching
+//                      props for this league. Player-prop markets cost
+//                      10 credits per market per region per event, so
+//                      sending fewer regions is a direct credit saving.
+//                      Each league's props live where the local books
+//                      operate: MLS is a US market, EPL is UK, the rest
+//                      of the continental leagues are covered by EU books.
+//                      Fallback to other regions happens on 422 if a
+//                      specific event doesn't expose props in its primary.
 const SOCCER_LEAGUES = {
-  epl: { oddsSportKey: 'soccer_epl', apiSportsId: 39, name: 'Premier League', region: 'England' },
-  la_liga: { oddsSportKey: 'soccer_spain_la_liga', apiSportsId: 140, name: 'La Liga', region: 'Spain' },
-  bundesliga: { oddsSportKey: 'soccer_germany_bundesliga', apiSportsId: 78, name: 'Bundesliga', region: 'Germany' },
-  serie_a: { oddsSportKey: 'soccer_italy_serie_a', apiSportsId: 135, name: 'Serie A', region: 'Italy' },
-  ligue_1: { oddsSportKey: 'soccer_france_ligue_one', apiSportsId: 61, name: 'Ligue 1', region: 'France' },
-  mls: { oddsSportKey: 'soccer_usa_mls', apiSportsId: 253, name: 'MLS', region: 'USA' },
+  epl:        { oddsSportKey: 'soccer_epl',                  apiSportsId: 39,  name: 'Premier League', region: 'England', oddsRegions: 'uk' },
+  la_liga:    { oddsSportKey: 'soccer_spain_la_liga',        apiSportsId: 140, name: 'La Liga',        region: 'Spain',   oddsRegions: 'eu' },
+  bundesliga: { oddsSportKey: 'soccer_germany_bundesliga',   apiSportsId: 78,  name: 'Bundesliga',     region: 'Germany', oddsRegions: 'eu' },
+  serie_a:    { oddsSportKey: 'soccer_italy_serie_a',        apiSportsId: 135, name: 'Serie A',        region: 'Italy',   oddsRegions: 'eu' },
+  ligue_1:    { oddsSportKey: 'soccer_france_ligue_one',     apiSportsId: 61,  name: 'Ligue 1',        region: 'France',  oddsRegions: 'eu' },
+  mls:        { oddsSportKey: 'soccer_usa_mls',              apiSportsId: 253, name: 'MLS',            region: 'USA',     oddsRegions: 'us' },
 };
 
 const ACTIVE_SOCCER_LEAGUES = Object.keys(SOCCER_LEAGUES);
+
+// Reverse lookup: oddsSportKey → { oddsRegions, ... }.
+// Used by fetchProps() which only receives a sportKey, not a league key.
+const LEAGUE_BY_SPORT_KEY = Object.fromEntries(
+  Object.values(SOCCER_LEAGUES).map((cfg) => [cfg.oddsSportKey, cfg])
+);
 const STATS_CACHE_TTL = 6 * 60 * 60;
 const PLAYER_SEARCH_CACHE_TTL = 24 * 60 * 60;
 const TEAM_DIRECTORY_CACHE_TTL = 24 * 60 * 60;
@@ -137,15 +154,25 @@ class SoccerAdapter extends BaseAdapter {
         }
       );
 
-      // Primary request + graceful region fallbacks for league/event-specific availability
+      // Region strategy — send ONLY the primary region for this league in
+      // the first request. Player-prop markets are billed 10 credits per
+      // market per region per event, so blanket-fetching all three regions
+      // triples the cost of every soccer prop call vs. targeted per-league
+      // regions. Fallback to the other regions is still available on 422
+      // (some individual events only publish props in a non-primary region).
+      const leagueCfg     = LEAGUE_BY_SPORT_KEY[sportKey];
+      const primaryRegion = leagueCfg?.oddsRegions || 'us';
+      // Ordered fallback list — drop the primary and try the rest one at a
+      // time, cheapest first (still 30 credits per attempt for props).
+      const fallbackRegions = ['us', 'uk', 'eu'].filter((r) => r !== primaryRegion);
+
       let response;
       try {
-        response = await fetchOdds('uk,eu,us');
+        response = await fetchOdds(primaryRegion);
       } catch (err) {
         if (err.response?.status !== 422) throw err;
 
-        // Some soccer events expose props in only one region; retry narrower regions
-        for (const fallbackRegion of ['eu', 'uk', 'us']) {
+        for (const fallbackRegion of fallbackRegions) {
           try {
             response = await fetchOdds(fallbackRegion);
             break;
@@ -155,7 +182,7 @@ class SoccerAdapter extends BaseAdapter {
         }
 
         if (!response) {
-          logger.warn('⚠️ [SOCCER] props unavailable', { oddsEventId, sportKey, status: 422 });
+          logger.warn('⚠️ [SOCCER] props unavailable', { oddsEventId, sportKey, status: 422, primaryRegion });
           return [];
         }
       }

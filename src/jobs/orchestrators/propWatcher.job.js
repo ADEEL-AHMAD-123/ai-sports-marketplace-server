@@ -24,9 +24,14 @@ const WATCHERS = {
   soccer: require('../sports/soccer/propWatcher'),
 };
 
-// Run frequently so policy windows (e.g. every 20m near start) can be honored.
-// Actual API usage is still gated per game by shouldFetchPropsForGame().
-const PROP_WATCHER_SCHEDULE = normalizeEnvValue(process.env.CRON_PROP_WATCHER_SCHEDULE) || '*/10 * * * *';
+// Every 15 minutes by default. The orchestrator itself is cheap — the
+// per-game polling policy (shouldFetchPropsForGame) is what actually
+// gates outbound API calls. Bumped from */10 to */15 as a credit-saving
+// measure; hot-tier games still get the 10-minute cadence internally
+// once they enter the last-hour window, so live/imminent kickoffs are
+// unaffected. Override with CRON_PROP_WATCHER_SCHEDULE if you have quota
+// to burn and want faster far-tier refreshes.
+const PROP_WATCHER_SCHEDULE = normalizeEnvValue(process.env.CRON_PROP_WATCHER_SCHEDULE) || '*/15 * * * *';
 let propWatcherRunning = false;
 
 const runPropWatcher = async (sport = null) => {
