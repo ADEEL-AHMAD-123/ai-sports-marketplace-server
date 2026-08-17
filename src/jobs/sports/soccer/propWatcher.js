@@ -48,50 +48,24 @@ async function run() {
   let totalUpserted = 0;
   const touchedEventIds = new Set();
 
+  // ── Team-logo backfill (runs BEFORE the policy gate) ────────────────
+  // For every soccer game in the tracked window — including those the
+  // polling policy will skip this cycle — refresh team names/logos from
+  // the (Redis-cached) API-Sports league directory if either team is
+  // missing a logo. This is the reason MLS games 2+ days out were still
+  // showing blank crests: they never get a prop fetch (correctly — outside
+  // the 30h refresh window) so the previous placement of this backfill
+  // inside the fetch path never ran on them.
+  //
+  // Cost: zero new Odds API calls; a single Redis GET per league (cached
+  // 24h) plus a Mongo update only when a logo actually changed.
+  await _backfillTeamLogos(games, adapter, logger);
+
   const results = await _mapGamesWithConcurrency(games, async (game) => {
     try {
       const engaged = engagedEventIds.has(String(game.oddsEventId));
       if (!shouldFetchPropsForGame(game, now, { engaged })) {
         return { upserted: 0, touchedEventId: null, outcome: 'skippedByPolicy' };
-      }
-
-      // Team-logo backfill. Games saved before the API-Sports league team
-      // directory was populated end up with null homeTeam.logoUrl and/or
-      // awayTeam.logoUrl. Re-resolve from the (Redis-cached) directory so
-      // the frontend gets a real logo instead of falling back to initials.
-      // Uses the cached directory — no new API-Sports request unless the
-      // cache expired.
-      const homeMissingLogo = !game.homeTeam?.logoUrl;
-      const awayMissingLogo = !game.awayTeam?.logoUrl;
-      if ((homeMissingLogo || awayMissingLogo) && game.leagueId) {
-        try {
-          const [refreshedHome, refreshedAway] = await Promise.all([
-            homeMissingLogo && game.homeTeam?.name
-              ? adapter.resolveTeamWithDirectory(game.homeTeam.name, game.leagueId)
-              : Promise.resolve(null),
-            awayMissingLogo && game.awayTeam?.name
-              ? adapter.resolveTeamWithDirectory(game.awayTeam.name, game.leagueId)
-              : Promise.resolve(null),
-          ]);
-          const updates = {};
-          if (refreshedHome?.logoUrl && refreshedHome.logoUrl !== game.homeTeam?.logoUrl) {
-            updates.homeTeam = { ...game.homeTeam, ...refreshedHome };
-          }
-          if (refreshedAway?.logoUrl && refreshedAway.logoUrl !== game.awayTeam?.logoUrl) {
-            updates.awayTeam = { ...game.awayTeam, ...refreshedAway };
-          }
-          if (Object.keys(updates).length) {
-            await Game.findByIdAndUpdate(game._id, { $set: updates });
-            // Reflect update in-memory so downstream props use the fresh names.
-            Object.assign(game, updates);
-          }
-        } catch (err) {
-          // Non-fatal — log at debug and keep going with existing team fields.
-          logger.debug('[SOCCERPropWatcher] Logo backfill failed', {
-            oddsEventId: game.oddsEventId,
-            error: err.message,
-          });
-        }
       }
 
       const [rawProps, injuryMap] = await Promise.all([
@@ -200,6 +174,75 @@ async function run() {
     engaged: engagedEventIds.size,
     oddsApiQuotaRemaining: quotaRemaining,
   };
+}
+
+/**
+ * Backfill missing team logos on any game in the tracked window.
+ *
+ * Runs BEFORE the polling-policy gate so games we won't fetch this cycle
+ * (typically anything outside the 30h refresh window) still get their
+ * crests. Bounded cost: one Redis GET per unique league (24h cached) +
+ * one Mongo update per game that actually needed a change.
+ *
+ * A game is a backfill candidate when EITHER team is missing logoUrl AND
+ * the game has a resolvable leagueId. We batch the directory lookup per
+ * league so a 78-game slate across 6 leagues does at most 6 Redis reads.
+ */
+async function _backfillTeamLogos(games, adapter, log) {
+  const needFill = games.filter((g) => (
+    g?.leagueId && (!g.homeTeam?.logoUrl || !g.awayTeam?.logoUrl)
+  ));
+  if (!needFill.length) return;
+
+  // Pull each league's cached directory ONCE, keyed by leagueId.
+  const uniqueLeagueIds = [...new Set(needFill.map((g) => g.leagueId))];
+  const seasonYear = adapter._defaultSeasonYear();
+  const directoryByLeague = new Map();
+  await Promise.all(uniqueLeagueIds.map(async (leagueId) => {
+    try {
+      const dir = await adapter._getLeagueTeamDirectory(leagueId, seasonYear);
+      directoryByLeague.set(leagueId, dir || {});
+    } catch (err) {
+      log.debug('[SOCCERPropWatcher] Directory fetch failed', { leagueId, error: err.message });
+      directoryByLeague.set(leagueId, null);
+    }
+  }));
+
+  let fixed = 0;
+  await Promise.all(needFill.map(async (game) => {
+    const directory = directoryByLeague.get(game.leagueId);
+    if (!directory) return;
+    try {
+      const homeMissing = !game.homeTeam?.logoUrl;
+      const awayMissing = !game.awayTeam?.logoUrl;
+      const refreshedHome = homeMissing && game.homeTeam?.name
+        ? adapter._resolveTeamFromDirectory(game.homeTeam.name, directory)
+        : null;
+      const refreshedAway = awayMissing && game.awayTeam?.name
+        ? adapter._resolveTeamFromDirectory(game.awayTeam.name, directory)
+        : null;
+      const updates = {};
+      if (refreshedHome?.logoUrl && refreshedHome.logoUrl !== game.homeTeam?.logoUrl) {
+        updates.homeTeam = { ...game.homeTeam, ...refreshedHome };
+      }
+      if (refreshedAway?.logoUrl && refreshedAway.logoUrl !== game.awayTeam?.logoUrl) {
+        updates.awayTeam = { ...game.awayTeam, ...refreshedAway };
+      }
+      if (Object.keys(updates).length) {
+        await Game.findByIdAndUpdate(game._id, { $set: updates });
+        Object.assign(game, updates);
+        fixed += 1;
+      }
+    } catch (err) {
+      log.debug('[SOCCERPropWatcher] Per-game backfill failed', {
+        oddsEventId: game.oddsEventId, error: err.message,
+      });
+    }
+  }));
+
+  if (fixed > 0) {
+    log.info(`[SOCCERPropWatcher] Backfilled logos on ${fixed}/${needFill.length} game(s)`);
+  }
 }
 
 async function _mapGamesWithConcurrency(games, worker) {
