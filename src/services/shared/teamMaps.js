@@ -215,6 +215,7 @@ const SOCCER_TEAMS = {
   'Manchester City':         { id: 50, abbr: 'mci' },
   'Manchester United':       { id: 33, abbr: 'mun' },
   'Newcastle':               { id: 34, abbr: 'new' },
+  'Newcastle United':        { id: 34, abbr: 'new' },
   'Nottingham Forest':       { id: 65, abbr: 'nfo' },
   'Southampton':             { id: 41, abbr: 'sou' },
   'Tottenham Hotspur':       { id: 47, abbr: 'tot' },
@@ -293,6 +294,20 @@ const SOCCER_TEAMS = {
   'Alavés':                  { id: 542, abbr: 'ala' },
   'Alaves':                  { id: 542, abbr: 'ala' },
   'Valencia':                { id: 532, abbr: 'val' },
+  'Real Madrid':             { id: 541, abbr: 'rma' },
+  'Barcelona':               { id: 529, abbr: 'bar' },
+  'FC Barcelona':            { id: 529, abbr: 'bar' },
+  'Villarreal':              { id: 533, abbr: 'vil' },
+  'Villarreal CF':           { id: 533, abbr: 'vil' },
+  'Getafe':                  { id: 546, abbr: 'get' },
+  'Getafe CF':               { id: 546, abbr: 'get' },
+  'CA Osasuna':              { id: 727, abbr: 'osa' },
+  'Osasuna':                 { id: 727, abbr: 'osa' },
+  'Levante':                 { id: 539, abbr: 'lev' },
+  'Levante UD':              { id: 539, abbr: 'lev' },
+  // Segunda / lower-tier — no confirmed API-Sports IDs; ESPN fallback.
+  'Real Racing Club de Santander': { abbr: 'rac' },
+  'Racing Santander':        { abbr: 'rac' },
 
   // ─── Serie A ──────────────────────────────────────────────────────────
   'AC Milan':                { id: 489, abbr: 'mil' },
@@ -347,6 +362,22 @@ const SOCCER_TEAMS = {
   'Toulouse':                { id: 96,  abbr: 'tou' },
   'Reims':                   { id: 93,  abbr: 'rei' },
   'Montpellier':             { id: 82,  abbr: 'mtp' },
+  // Ligue 1 additions — IDs verified from API-Sports football registry
+  // for the well-known Ligue 1 sides. Second-tier teams (Le Mans, Paris FC)
+  // don't have confirmed IDs; ESPN fallback handles them.
+  'Brest':                   { id: 106, abbr: 'bre' },
+  'Stade Brestois':          { id: 106, abbr: 'bre' },
+  'Lorient':                 { id: 97,  abbr: 'lor' },
+  'FC Lorient':              { id: 97,  abbr: 'lor' },
+  'Troyes':                  { id: 92,  abbr: 'tro' },
+  'ES Troyes AC':            { id: 92,  abbr: 'tro' },
+  'Angers':                  { id: 77,  abbr: 'ang' },
+  'Angers SCO':              { id: 77,  abbr: 'ang' },
+  'Le Havre':                { id: 111, abbr: 'lha' },
+  'Le Havre AC':             { id: 111, abbr: 'lha' },
+  // Second-tier French / uncertain IDs — abbr only, ESPN CDN fallback.
+  'Le Mans FC':              { abbr: 'lem' },
+  'Paris FC':                { abbr: 'pfc' },
 
   // ─── EFL Championship teams seen in the EPL feed ──────────────────────
   // The Odds API's soccer_epl feed sometimes includes recently-promoted or
