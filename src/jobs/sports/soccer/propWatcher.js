@@ -192,26 +192,52 @@ async function _backfillTeamLogos(games, adapter, log) {
   const needFill = games.filter((g) => (
     g?.leagueId && (!g.homeTeam?.logoUrl || !g.awayTeam?.logoUrl)
   ));
-  if (!needFill.length) return;
 
-  // Pull each league's cached directory ONCE, keyed by leagueId.
+  // Games that need backfill but have no leagueId — flag once so we know
+  // the data is malformed rather than silently ignoring.
+  const missingLeagueId = games.filter((g) => (
+    !g?.leagueId && (!g.homeTeam?.logoUrl || !g.awayTeam?.logoUrl)
+  ));
+  if (missingLeagueId.length) {
+    log.warn(
+      `[SOCCERPropWatcher] ${missingLeagueId.length} game(s) missing leagueId — cannot backfill logos. ` +
+      `Re-run morning-scraper to re-normalize.`
+    );
+  }
+
+  if (!needFill.length) {
+    log.info(`[SOCCERPropWatcher] Logo backfill — no candidates (${games.length} games all have logos)`);
+    return;
+  }
+
   const uniqueLeagueIds = [...new Set(needFill.map((g) => g.leagueId))];
   const seasonYear = adapter._defaultSeasonYear();
+  log.info(
+    `[SOCCERPropWatcher] Logo backfill starting — ${needFill.length} candidate game(s) across ${uniqueLeagueIds.length} league(s), season ${seasonYear}`
+  );
+
   const directoryByLeague = new Map();
   await Promise.all(uniqueLeagueIds.map(async (leagueId) => {
     try {
       const dir = await adapter._getLeagueTeamDirectory(leagueId, seasonYear);
+      const size = dir ? Object.keys(dir).length : 0;
+      log.info(`[SOCCERPropWatcher] Directory for league ${leagueId}: ${size} teams`);
       directoryByLeague.set(leagueId, dir || {});
     } catch (err) {
-      log.debug('[SOCCERPropWatcher] Directory fetch failed', { leagueId, error: err.message });
+      log.warn(`[SOCCERPropWatcher] Directory fetch FAILED for league ${leagueId} — ${err.message}`);
       directoryByLeague.set(leagueId, null);
     }
   }));
 
-  let fixed = 0;
+  let fixed         = 0;
+  let noMatch       = 0;
+  let noDirectory   = 0;
+  const missedNames = new Set();
+
   await Promise.all(needFill.map(async (game) => {
     const directory = directoryByLeague.get(game.leagueId);
-    if (!directory) return;
+    if (!directory || Object.keys(directory).length === 0) { noDirectory += 1; return; }
+
     try {
       const homeMissing = !game.homeTeam?.logoUrl;
       const awayMissing = !game.awayTeam?.logoUrl;
@@ -224,25 +250,32 @@ async function _backfillTeamLogos(games, adapter, log) {
       const updates = {};
       if (refreshedHome?.logoUrl && refreshedHome.logoUrl !== game.homeTeam?.logoUrl) {
         updates.homeTeam = { ...game.homeTeam, ...refreshedHome };
+      } else if (homeMissing && game.homeTeam?.name) {
+        missedNames.add(game.homeTeam.name);
       }
       if (refreshedAway?.logoUrl && refreshedAway.logoUrl !== game.awayTeam?.logoUrl) {
         updates.awayTeam = { ...game.awayTeam, ...refreshedAway };
+      } else if (awayMissing && game.awayTeam?.name) {
+        missedNames.add(game.awayTeam.name);
       }
       if (Object.keys(updates).length) {
         await Game.findByIdAndUpdate(game._id, { $set: updates });
         Object.assign(game, updates);
         fixed += 1;
+      } else {
+        noMatch += 1;
       }
     } catch (err) {
-      log.debug('[SOCCERPropWatcher] Per-game backfill failed', {
+      log.warn('[SOCCERPropWatcher] Per-game backfill failed', {
         oddsEventId: game.oddsEventId, error: err.message,
       });
     }
   }));
 
-  if (fixed > 0) {
-    log.info(`[SOCCERPropWatcher] Backfilled logos on ${fixed}/${needFill.length} game(s)`);
-  }
+  log.info(
+    `[SOCCERPropWatcher] Logo backfill — fixed=${fixed}, noMatch=${noMatch}, noDirectory=${noDirectory}` +
+    (missedNames.size ? `, unmatchedTeams=[${[...missedNames].slice(0, 10).join(', ')}${missedNames.size > 10 ? '…' : ''}]` : '')
+  );
 }
 
 async function _mapGamesWithConcurrency(games, worker) {

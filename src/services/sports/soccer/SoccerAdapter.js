@@ -561,7 +561,12 @@ class SoccerAdapter extends BaseAdapter {
   async _getLeagueTeamDirectory(leagueId, seasonYear) {
     const cacheKey = `soccer:league-team-directory:${leagueId}:${seasonYear}`;
     const cached = await cacheGet(cacheKey);
-    if (cached && typeof cached === 'object') return cached;
+    // Only trust NON-EMPTY cached directories. An empty {} would poison the
+    // cache for 24h if the very first fetch failed or hit a transient
+    // API-Sports outage (or requested a season API-Sports doesn't have yet).
+    if (cached && typeof cached === 'object' && Object.keys(cached).length > 0) {
+      return cached;
+    }
 
     const rows = await this.statsClient.get('teams', { league: leagueId, season: seasonYear });
     const directory = {};
@@ -577,7 +582,16 @@ class SoccerAdapter extends BaseAdapter {
       };
     }
 
-    await cacheSet(cacheKey, directory, TEAM_DIRECTORY_CACHE_TTL);
+    // Only cache non-empty results. If API-Sports gave us nothing we let
+    // the next caller retry rather than sitting on {} for a day.
+    if (Object.keys(directory).length > 0) {
+      await cacheSet(cacheKey, directory, TEAM_DIRECTORY_CACHE_TTL);
+    } else {
+      logger.warn(
+        `[SOCCER] League directory empty — not caching`,
+        { leagueId, seasonYear, rowsReceived: Array.isArray(rows) ? rows.length : 0 }
+      );
+    }
     return directory;
   }
 
