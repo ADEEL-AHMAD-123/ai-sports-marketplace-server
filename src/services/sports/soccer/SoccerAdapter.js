@@ -565,15 +565,35 @@ class SoccerAdapter extends BaseAdapter {
     // 2026/27 roster isn't published until August). Team IDs and logos
     // don't change year to year, so a prior-season directory is a good
     // proxy — the goal is just to resolve name → logo URL.
-    const primary = await this._fetchLeagueDirectory(leagueId, seasonYear);
+    //
+    // BOTH the primary and fallback fetches are wrapped in try/catch. If
+    // primary throws (5xx, network timeout, ApiSportsClient re-throw), we
+    // still try the fallback. If both throw, we return an empty directory
+    // and callers fall back to the static SOCCER_TEAMS map.
+    let primary = {};
+    try {
+      primary = await this._fetchLeagueDirectory(leagueId, seasonYear);
+    } catch (err) {
+      logger.warn(
+        `[SOCCER] League ${leagueId} directory fetch threw for season ${seasonYear} — trying prior season`,
+        { error: err.message }
+      );
+    }
     if (Object.keys(primary).length > 0) return primary;
 
     const fallbackYear = seasonYear - 1;
     logger.info(
       `[SOCCER] League ${leagueId} directory empty for season ${seasonYear} — trying ${fallbackYear}`
     );
-    const fallback = await this._fetchLeagueDirectory(leagueId, fallbackYear);
-    return fallback; // may still be empty; caller handles that
+    try {
+      return await this._fetchLeagueDirectory(leagueId, fallbackYear);
+    } catch (err) {
+      logger.warn(
+        `[SOCCER] League ${leagueId} fallback directory fetch threw for season ${fallbackYear}`,
+        { error: err.message }
+      );
+      return {}; // static map path in the caller handles this
+    }
   }
 
   /**
