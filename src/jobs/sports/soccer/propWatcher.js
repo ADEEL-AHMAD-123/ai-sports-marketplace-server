@@ -249,8 +249,14 @@ async function _backfillTeamLogos(games, adapter, log) {
   const missedNames = new Set();
 
   await Promise.all(needFill.map(async (game) => {
-    const directory = directoryByLeague.get(game.leagueId);
-    if (!directory || Object.keys(directory).length === 0) { noDirectory += 1; return; }
+    // Even when the API-Sports directory is empty (subscription doesn't
+    // cover football, or league not yet populated), _resolveTeamFromDirectory
+    // still runs the static-map path — which now has hardcoded API-Sports
+    // team IDs for MLS + top European leagues that produce a valid
+    // api-sports.io/football/teams/{id}.png URL. So we always give it a
+    // chance rather than short-circuiting on empty directory.
+    const directory = directoryByLeague.get(game.leagueId) || {};
+    if (Object.keys(directory).length === 0) noDirectory += 1;
 
     try {
       const homeMissing = !game.homeTeam?.logoUrl;

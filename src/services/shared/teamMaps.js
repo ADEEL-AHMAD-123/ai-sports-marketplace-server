@@ -166,6 +166,17 @@ const NFL_TEAMS = {
 
 // ─── Soccer (Premier League) ───────────────────────────────────────────────
 // API-Sports football v3 team IDs (league 39)
+// NOTE on `id` field for soccer teams: this is the API-Sports "football"
+// numeric team ID, used to build a logo URL at
+//   https://media.api-sports.io/football/teams/{id}.png
+// Those images are public — you can hotlink them without an API-Sports
+// subscription. So having `id` on a team gives us a working crest even
+// if the caller's football data plan doesn't include the league.
+//
+// If a team is missing `id` here, getTeamLogoUrl falls back to the ESPN
+// CDN using the abbreviation. That ESPN URL is a best-effort — some codes
+// won't exist there and the frontend's TeamLogo onError handler falls
+// through to initials.
 const SOCCER_TEAMS = {
   'Sevilla':                 { id: 536, abbr: 'sev' },
   'Espanyol':                { id: 540, abbr: 'esp' },
@@ -208,51 +219,63 @@ const SOCCER_TEAMS = {
   'Wolves':                  { id: 39, abbr: 'wol' },
 
   // ─── MLS (US/Canada) ──────────────────────────────────────────────────
-  // Abbreviations chosen to match MLS's official 3-letter codes so
-  // "New York City FC" ≠ "New England Revolution" (both were falling into
-  // the name.slice(0,3) fallback and colliding as "NEW"). Alt names cover
-  // the variants The Odds API returns (with/without "FC", "CF", "SC", etc).
-  'Atlanta United FC':       { abbr: 'atl' },
-  'Atlanta United':          { abbr: 'atl' },
-  'Austin FC':               { abbr: 'atx' },
-  'Charlotte FC':            { abbr: 'clt' },
-  'Chicago Fire FC':         { abbr: 'chi' },
-  'Chicago Fire':            { abbr: 'chi' },
-  'FC Cincinnati':           { abbr: 'cin' },
-  'Colorado Rapids':         { abbr: 'col' },
-  'Columbus Crew':           { abbr: 'clb' },
-  'Columbus Crew SC':        { abbr: 'clb' },
-  'D.C. United':             { abbr: 'dc'  },
-  'DC United':               { abbr: 'dc'  },
-  'FC Dallas':               { abbr: 'dal' },
-  'Houston Dynamo FC':       { abbr: 'hou' },
-  'Houston Dynamo':          { abbr: 'hou' },
-  'Los Angeles FC':          { abbr: 'lafc' },
-  'LAFC':                    { abbr: 'lafc' },
-  'LA Galaxy':               { abbr: 'lag' },
-  'Los Angeles Galaxy':      { abbr: 'lag' },
-  'Minnesota United FC':     { abbr: 'min' },
-  'Minnesota United':        { abbr: 'min' },
-  'CF Montreal':             { abbr: 'mtl' },
-  'Montreal Impact':         { abbr: 'mtl' },
-  'Nashville SC':            { abbr: 'nsh' },
-  'New England Revolution':  { abbr: 'ne'  },
-  'New York City FC':        { abbr: 'nyc' },
-  'New York Red Bulls':      { abbr: 'nyr' },
-  'Orlando City SC':         { abbr: 'orl' },
-  'Orlando City':            { abbr: 'orl' },
-  'Philadelphia Union':      { abbr: 'phi' },
-  'Portland Timbers':        { abbr: 'por' },
-  'Real Salt Lake':          { abbr: 'rsl' },
-  'San Jose Earthquakes':    { abbr: 'sj'  },
-  'Seattle Sounders FC':     { abbr: 'sea' },
-  'Seattle Sounders':        { abbr: 'sea' },
-  'Sporting Kansas City':    { abbr: 'skc' },
-  'Sporting KC':             { abbr: 'skc' },
-  'St. Louis City SC':       { abbr: 'stl' },
-  'St Louis City SC':        { abbr: 'stl' },
-  'Vancouver Whitecaps FC':  { abbr: 'van' },
-  'Vancouver Whitecaps':     { abbr: 'van' },
+  // API-Sports football team IDs. These are public — the image at
+  // media.api-sports.io/football/teams/{id}.png loads without an auth
+  // header, so this works even if the caller's API-Sports football plan
+  // is inactive. Abbreviations match MLS's official 3-letter codes so
+  // NYC ≠ NE (both were previously falling into the name.slice(0,3)
+  // collision as "NEW"). Alt names cover Odds-API variants (with/without
+  // FC, CF, SC).
+  'Atlanta United FC':       { id: 1608, abbr: 'atl' },
+  'Atlanta United':          { id: 1608, abbr: 'atl' },
+  'Austin FC':               { id: 9569, abbr: 'atx' },
+  'Charlotte FC':            { id: 18310, abbr: 'clt' },
+  'Chicago Fire FC':         { id: 1599, abbr: 'chi' },
+  'Chicago Fire':            { id: 1599, abbr: 'chi' },
+  'FC Cincinnati':           { id: 2242, abbr: 'cin' },
+  'Colorado Rapids':         { id: 1600, abbr: 'col' },
+  'Columbus Crew':           { id: 1602, abbr: 'clb' },
+  'Columbus Crew SC':        { id: 1602, abbr: 'clb' },
+  'D.C. United':             { id: 1603, abbr: 'dc'  },
+  'DC United':               { id: 1603, abbr: 'dc'  },
+  'FC Dallas':               { id: 1604, abbr: 'dal' },
+  'Houston Dynamo FC':       { id: 1605, abbr: 'hou' },
+  'Houston Dynamo':          { id: 1605, abbr: 'hou' },
+  'Los Angeles FC':          { id: 2237, abbr: 'lafc' },
+  'LAFC':                    { id: 2237, abbr: 'lafc' },
+  'LA Galaxy':               { id: 1616, abbr: 'lag' },
+  'Los Angeles Galaxy':      { id: 1616, abbr: 'lag' },
+  'Minnesota United FC':     { id: 1596, abbr: 'min' },
+  'Minnesota United':        { id: 1596, abbr: 'min' },
+  'CF Montreal':             { id: 1614, abbr: 'mtl' },
+  'Montreal Impact':         { id: 1614, abbr: 'mtl' },
+  'Nashville SC':            { id: 18314, abbr: 'nsh' },
+  'New England Revolution':  { id: 1615, abbr: 'ne'  },
+  'New York City FC':        { id: 1611, abbr: 'nyc' },
+  'New York Red Bulls':      { id: 1613, abbr: 'nyr' },
+  'Orlando City SC':         { id: 1610, abbr: 'orl' },
+  'Orlando City':            { id: 1610, abbr: 'orl' },
+  'Philadelphia Union':      { id: 1617, abbr: 'phi' },
+  'Portland Timbers':        { id: 1607, abbr: 'por' },
+  'Real Salt Lake':          { id: 1606, abbr: 'rsl' },
+  'San Jose Earthquakes':    { id: 1601, abbr: 'sj'  },
+  'Seattle Sounders FC':     { id: 1609, abbr: 'sea' },
+  'Seattle Sounders':        { id: 1609, abbr: 'sea' },
+  'Sporting Kansas City':    { id: 1612, abbr: 'skc' },
+  'Sporting KC':             { id: 1612, abbr: 'skc' },
+  'St. Louis City SC':       { id: 18315, abbr: 'stl' },
+  'St Louis City SC':        { id: 18315, abbr: 'stl' },
+  'Vancouver Whitecaps FC':  { id: 1598, abbr: 'van' },
+  'Vancouver Whitecaps':     { id: 1598, abbr: 'van' },
+
+  // Segunda / Liga F variants seen in the current Odds-API feed. IDs
+  // omitted where uncertain — ESPN CDN fallback kicks in via abbr.
+  'Elche CF':                { abbr: 'elc' },
+  'Elche':                   { abbr: 'elc' },
+  'Deportivo La Coruña':     { abbr: 'dep' },
+  'Deportivo La Coruna':     { abbr: 'dep' },
+  'Malaga':                  { abbr: 'mal' },
+  'Málaga':                  { abbr: 'mal' },
 };
 
 // ─── Lookup helpers ───────────────────────────────────────────────────────────
@@ -301,12 +324,31 @@ const getTeamAbbr = (sport, name) => {
 };
 
 /**
- * Get ESPN CDN logo URL for a team.
- * @returns {string} Full HTTPS URL ready to use in <img src>
+ * Get a logo URL for a team, trying the most reliable source first.
+ *
+ * Soccer resolution order:
+ *   1. API-Sports football CDN using hardcoded team `id`
+ *      (media.api-sports.io/football/teams/{id}.png — public image, works
+ *       without an API-Sports subscription)
+ *   2. ESPN CDN using the team abbreviation as a final fallback
+ *      (a.espncdn.com/i/teamlogos/soccer/500/{abbr}.png — some URLs 404,
+ *       frontend's <TeamLogo onError> falls through to initials)
+ *
+ * Non-soccer sports: uses ESPN CDN with either the sport's known `espn`
+ * code or the abbreviation.
+ *
+ * @returns {string|null} Full HTTPS URL, or null if we can't build one.
  */
 const getTeamLogoUrl = (sport, name) => {
   if (sport === 'soccer') {
-    return getApiSportsLogoUrl(sport, name);
+    const apiSportsUrl = getApiSportsLogoUrl(sport, name);
+    if (apiSportsUrl) return apiSportsUrl;
+    // Fallback to ESPN's soccer CDN. This is best-effort — codes for some
+    // teams (particularly newer MLS expansion sides) don't exist there,
+    // in which case the frontend's TeamLogo onError shows initials.
+    const abbr = TEAM_MAPS.soccer?.[name]?.abbr;
+    if (abbr) return `https://a.espncdn.com/i/teamlogos/soccer/500/${abbr.toLowerCase()}.png`;
+    return null;
   }
   const team = TEAM_MAPS[sport]?.[name];
   if (!team) return null;
