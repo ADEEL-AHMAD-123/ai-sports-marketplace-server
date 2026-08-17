@@ -55,15 +55,23 @@ async function run() {
   // Engaged games (insights / recent views) earn the fast 10-min cadence.
   const engagedEventIds = await getEngagedEventIds(games, now);
 
-  let totalUpserted = 0;
-  let totalScratched = 0;
+  let totalUpserted   = 0;
+  let totalScratched  = 0;
+  let skippedByPolicy = 0;
+  let skippedEmpty    = 0;
+  let attempted       = 0;
 
   for (const game of games) {
     const engaged = engagedEventIds.has(String(game.oddsEventId));
-    if (!shouldFetchPropsForGame(game, now, { engaged })) continue;
+    if (!shouldFetchPropsForGame(game, now, { engaged })) { skippedByPolicy += 1; continue; }
 
+    attempted += 1;
     const rawProps = await adapter.fetchProps(game.oddsEventId);
-    if (!rawProps.length) continue;
+    if (!rawProps.length) {
+      await Game.findByIdAndUpdate(game._id, { hasProps: false, propsLastFetchedAt: new Date() });
+      skippedEmpty += 1;
+      continue;
+    }
 
     const homeName = game.homeTeam?.name || null;
     const awayName = game.awayTeam?.name || null;
@@ -139,8 +147,24 @@ async function run() {
     }
   }
 
-  logger.info(`✅ [${SPORT}PropWatcher] Done — ${totalUpserted} props (${totalScratched} marked OUT)`);
-  return { upserted: totalUpserted, scratched: totalScratched };
+  const quotaRemaining = Number.isFinite(adapter.oddsApiQuotaRemaining)
+    ? adapter.oddsApiQuotaRemaining : 'unknown';
+  logger.info(
+    `✅ [${SPORT}PropWatcher] Done — ${totalUpserted} props ` +
+    `(${totalScratched} marked OUT, games=${games.length}, attempted=${attempted}, ` +
+    `skippedByPolicy=${skippedByPolicy}, skippedEmpty=${skippedEmpty}, ` +
+    `engaged=${engagedEventIds.size}, oddsApiQuotaRemaining=${quotaRemaining})`
+  );
+  return {
+    upserted: totalUpserted,
+    scratched: totalScratched,
+    games: games.length,
+    attempted,
+    skippedByPolicy,
+    skippedEmpty,
+    engaged: engagedEventIds.size,
+    oddsApiQuotaRemaining: quotaRemaining,
+  };
 }
 
 module.exports = { run };

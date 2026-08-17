@@ -52,7 +52,46 @@ async function run() {
     try {
       const engaged = engagedEventIds.has(String(game.oddsEventId));
       if (!shouldFetchPropsForGame(game, now, { engaged })) {
-        return { upserted: 0, touchedEventId: null };
+        return { upserted: 0, touchedEventId: null, outcome: 'skippedByPolicy' };
+      }
+
+      // Team-logo backfill. Games saved before the API-Sports league team
+      // directory was populated end up with null homeTeam.logoUrl and/or
+      // awayTeam.logoUrl. Re-resolve from the (Redis-cached) directory so
+      // the frontend gets a real logo instead of falling back to initials.
+      // Uses the cached directory — no new API-Sports request unless the
+      // cache expired.
+      const homeMissingLogo = !game.homeTeam?.logoUrl;
+      const awayMissingLogo = !game.awayTeam?.logoUrl;
+      if ((homeMissingLogo || awayMissingLogo) && game.leagueId) {
+        try {
+          const [refreshedHome, refreshedAway] = await Promise.all([
+            homeMissingLogo && game.homeTeam?.name
+              ? adapter.resolveTeamWithDirectory(game.homeTeam.name, game.leagueId)
+              : Promise.resolve(null),
+            awayMissingLogo && game.awayTeam?.name
+              ? adapter.resolveTeamWithDirectory(game.awayTeam.name, game.leagueId)
+              : Promise.resolve(null),
+          ]);
+          const updates = {};
+          if (refreshedHome?.logoUrl && refreshedHome.logoUrl !== game.homeTeam?.logoUrl) {
+            updates.homeTeam = { ...game.homeTeam, ...refreshedHome };
+          }
+          if (refreshedAway?.logoUrl && refreshedAway.logoUrl !== game.awayTeam?.logoUrl) {
+            updates.awayTeam = { ...game.awayTeam, ...refreshedAway };
+          }
+          if (Object.keys(updates).length) {
+            await Game.findByIdAndUpdate(game._id, { $set: updates });
+            // Reflect update in-memory so downstream props use the fresh names.
+            Object.assign(game, updates);
+          }
+        } catch (err) {
+          // Non-fatal — log at debug and keep going with existing team fields.
+          logger.debug('[SOCCERPropWatcher] Logo backfill failed', {
+            oddsEventId: game.oddsEventId,
+            error: err.message,
+          });
+        }
       }
 
       const [rawProps, injuryMap] = await Promise.all([
@@ -74,7 +113,7 @@ async function run() {
           { $set: { isAvailable: false, lastUpdatedAt: new Date() } }
         );
         await Game.findByIdAndUpdate(game._id, { hasProps: false, propsLastFetchedAt: new Date() });
-        return { upserted: 0, touchedEventId: null };
+        return { upserted: 0, touchedEventId: null, outcome: 'skippedEmpty' };
       }
 
       const bulkOps = rawProps.map((rp) => {
@@ -109,7 +148,7 @@ async function run() {
       await _invalidateMovedLines(game.oddsEventId, rawProps, adapter);
       await Game.findByIdAndUpdate(game._id, { hasProps: true, propsLastFetchedAt: new Date() });
 
-      return { upserted: bulkOps.length, touchedEventId: game.oddsEventId };
+      return { upserted: bulkOps.length, touchedEventId: game.oddsEventId, outcome: 'upserted' };
     } catch (err) {
       logger.error('[SOCCERPropWatcher] Game processing failed', {
         oddsEventId: game.oddsEventId,
@@ -117,13 +156,20 @@ async function run() {
         awayTeam: game.awayTeam?.name,
         error: err.message,
       });
-      return { upserted: 0, touchedEventId: null };
+      return { upserted: 0, touchedEventId: null, outcome: 'failed' };
     }
   });
 
+  // Aggregate per-game outcomes into totals for the diagnostic summary.
+  let skippedByPolicy = 0;
+  let skippedEmpty    = 0;
+  let attempted       = 0;
   for (const result of results) {
     totalUpserted += result?.upserted || 0;
     if (result?.touchedEventId) touchedEventIds.add(result.touchedEventId);
+    if (result?.outcome === 'skippedByPolicy') skippedByPolicy += 1;
+    if (result?.outcome === 'skippedEmpty')    { skippedEmpty += 1; attempted += 1; }
+    if (result?.outcome === 'upserted')        attempted += 1;
   }
 
   await scoreSport(SPORT, 'soccer.propWatcher', { eventIds: [...touchedEventIds] });
@@ -137,8 +183,23 @@ async function run() {
     }
   }
 
-  logger.info(`✅ [${SPORT.toUpperCase()}PropWatcher] Done — ${totalUpserted} props`);
-  return { upserted: totalUpserted };
+  const quotaRemaining = Number.isFinite(adapter.oddsApiQuotaRemaining)
+    ? adapter.oddsApiQuotaRemaining : 'unknown';
+  logger.info(
+    `✅ [${SPORT.toUpperCase()}PropWatcher] Done — ${totalUpserted} props ` +
+    `(games=${games.length}, attempted=${attempted}, ` +
+    `skippedByPolicy=${skippedByPolicy}, skippedEmpty=${skippedEmpty}, ` +
+    `engaged=${engagedEventIds.size}, oddsApiQuotaRemaining=${quotaRemaining})`
+  );
+  return {
+    upserted: totalUpserted,
+    games: games.length,
+    attempted,
+    skippedByPolicy,
+    skippedEmpty,
+    engaged: engagedEventIds.size,
+    oddsApiQuotaRemaining: quotaRemaining,
+  };
 }
 
 async function _mapGamesWithConcurrency(games, worker) {

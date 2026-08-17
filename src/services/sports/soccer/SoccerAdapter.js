@@ -292,28 +292,59 @@ class SoccerAdapter extends BaseAdapter {
     return buildSoccerPrompt(params);
   }
 
-  normalizeGame(rawGame, leagueConfig = SOCCER_LEAGUES.epl, leagueTeamDirectory = null) {
-    const homeTeam = rawGame.home_team;
-    const awayTeam = rawGame.away_team;
+  /**
+   * Public helper — resolve a team object (name/abbreviation/apiSportsId/
+   * logoUrl) using the league team directory + static maps. Used by both
+   * normalizeGame() at schedule time AND by the propWatcher when it needs
+   * to backfill logos on Game records that were saved before the directory
+   * lookup produced a match.
+   *
+   * Callable without a leagueTeamDirectory — will fall back to the static
+   * map alone. When called with a leagueId, it pulls the directory from
+   * the shared Redis cache (populated by _getLeagueTeamDirectory during
+   * the last schedule run) so no new API-Sports request is made.
+   */
+  async resolveTeamWithDirectory(teamName, leagueId = null, seasonYear = null) {
+    if (!teamName) return null;
+    let directory = null;
+    if (leagueId) {
+      const year = seasonYear || this._defaultSeasonYear();
+      try {
+        directory = await this._getLeagueTeamDirectory(leagueId, year);
+      } catch (err) {
+        logger.warn('[SOCCER] resolveTeamWithDirectory — directory lookup failed', {
+          leagueId, error: err.message,
+        });
+      }
+    }
+    return this._resolveTeamFromDirectory(teamName, directory);
+  }
 
-    const resolveTeam = (teamName) => {
-      const staticId = getTeamId('soccer', teamName);
-      const staticLogo = getTeamLogoUrl('soccer', teamName) || getApiSportsLogoUrl('soccer', teamName);
-      const staticAbbr = getTeamAbbr('soccer', teamName);
+  /**
+   * Pure resolver — no I/O, no side effects. Given a team name and an
+   * optional in-memory directory, returns the best-known team object.
+   * Extracted so both normalizeGame and the async backfill helper share
+   * the exact same logic.
+   */
+  _resolveTeamFromDirectory(teamName, leagueTeamDirectory = null) {
+    const staticId   = getTeamId('soccer', teamName);
+    const staticLogo = getTeamLogoUrl('soccer', teamName) || getApiSportsLogoUrl('soccer', teamName);
+    const staticAbbr = getTeamAbbr('soccer', teamName);
 
-      const directoryTeam = this._findLeagueTeam(leagueTeamDirectory, teamName);
-      const dynamicId = Number(directoryTeam?.id) || null;
-      const dynamicCode = directoryTeam?.code ? String(directoryTeam.code).toUpperCase() : null;
-      const dynamicLogo = directoryTeam?.logo || (dynamicId ? `https://media.api-sports.io/football/teams/${dynamicId}.png` : null);
+    const directoryTeam = this._findLeagueTeam(leagueTeamDirectory, teamName);
+    const dynamicId    = Number(directoryTeam?.id) || null;
+    const dynamicCode  = directoryTeam?.code ? String(directoryTeam.code).toUpperCase() : null;
+    const dynamicLogo  = directoryTeam?.logo || (dynamicId ? `https://media.api-sports.io/football/teams/${dynamicId}.png` : null);
 
-      return {
-        name: teamName,
-        abbreviation: dynamicCode || staticAbbr,
-        apiSportsId: staticId || dynamicId,
-        logoUrl: staticLogo || dynamicLogo || null,
-      };
+    return {
+      name:         teamName,
+      abbreviation: dynamicCode || staticAbbr,
+      apiSportsId:  staticId || dynamicId,
+      logoUrl:      staticLogo || dynamicLogo || null,
     };
+  }
 
+  normalizeGame(rawGame, leagueConfig = SOCCER_LEAGUES.epl, leagueTeamDirectory = null) {
     return {
       sport: 'soccer',
       league: leagueConfig.name,
@@ -321,8 +352,8 @@ class SoccerAdapter extends BaseAdapter {
       leagueRegion: leagueConfig.region,
       oddsSportKey: leagueConfig.oddsSportKey,
       oddsEventId: rawGame.id,
-      homeTeam: resolveTeam(homeTeam),
-      awayTeam: resolveTeam(awayTeam),
+      homeTeam: this._resolveTeamFromDirectory(rawGame.home_team, leagueTeamDirectory),
+      awayTeam: this._resolveTeamFromDirectory(rawGame.away_team, leagueTeamDirectory),
       startTime: new Date(rawGame.commence_time),
       status: 'scheduled',
     };

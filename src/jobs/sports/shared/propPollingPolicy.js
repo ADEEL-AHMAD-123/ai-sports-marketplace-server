@@ -161,6 +161,17 @@ function shouldFetchPropsForGame(game, now = new Date(), opts = {}) {
 
   const isLive = String(game.status || '').toLowerCase() === LIVE_STATUS;
 
+  // First-fetch bypass. If we've never fetched props for this game AND
+  // kickoff is within the refresh window, give it one attempt regardless
+  // of tier/engagement. Without this bypass, a newly-imported cold game
+  // in the "far" tier (12-30h out) gets skipped on every cycle until a
+  // user views it — meaning the slate looks empty right after morning
+  // scrape until someone happens to click. Cost is bounded: at most one
+  // fetch per new game per its lifetime in the tracked window.
+  if (!game.propsLastFetchedAt && hrsToStart <= POLICY.refreshWindowHours && hrsToStart >= 0) {
+    return true;
+  }
+
   // LIVE games are polled by status, not by the clock. Scheduled games follow
   // the time-tiered cadence. Engagement selects the fast vs sparse cadence.
   let intervalMinutes;
@@ -172,7 +183,7 @@ function shouldFetchPropsForGame(game, now = new Date(), opts = {}) {
 
   if (intervalMinutes == null) return false;
 
-  // First fetch once it's pollable — populate props now.
+  // First fetch for LIVE games (covered above for scheduled) — populate now.
   if (!game.propsLastFetchedAt) return true;
 
   return minutesSince(game.propsLastFetchedAt, now) >= intervalMinutes;

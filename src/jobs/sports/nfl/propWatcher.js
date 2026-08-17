@@ -39,13 +39,30 @@ async function run() {
   // Engaged games (insights / recent views) earn the fast 10-min cadence.
   const engagedEventIds = await getEngagedEventIds(games, now);
 
-  let totalUpserted = 0;
+  let totalUpserted   = 0;
+  let skippedByPolicy = 0;
+  let skippedEmpty    = 0;
+  let attempted       = 0;
 
   for (const game of games) {
     const engaged = engagedEventIds.has(String(game.oddsEventId));
-    if (!shouldFetchPropsForGame(game, now, { engaged })) continue;
+    if (!shouldFetchPropsForGame(game, now, { engaged })) { skippedByPolicy += 1; continue; }
 
+    attempted += 1;
     const rawProps = await adapter.fetchProps(game.oddsEventId);
+
+    // Short-circuit on empty response BEFORE spending time on player ID
+    // resolution and injury lookups. Also stamps propsLastFetchedAt so
+    // the polling policy respects the interval on subsequent cycles.
+    if (!rawProps.length) {
+      await PlayerProp.updateMany(
+        { sport: SPORT, oddsEventId: game.oddsEventId, isAvailable: true },
+        { $set: { isAvailable: false, lastUpdatedAt: new Date() } }
+      );
+      await Game.findByIdAndUpdate(game._id, { hasProps: false, propsLastFetchedAt: new Date() });
+      skippedEmpty += 1;
+      continue;
+    }
 
     const uniqueNames = [...new Set(rawProps.map((p) => p.playerName))];
     const playerIdMap = await bulkResolvePlayerIds(
@@ -63,15 +80,6 @@ async function run() {
       oddsEventId: game.oddsEventId,
       startTime: game.startTime,
     }).catch(() => new Map());
-
-    if (!rawProps.length) {
-      await PlayerProp.updateMany(
-        { sport: SPORT, oddsEventId: game.oddsEventId, isAvailable: true },
-        { $set: { isAvailable: false, lastUpdatedAt: new Date() } }
-      );
-      await Game.findByIdAndUpdate(game._id, { hasProps: false, propsLastFetchedAt: new Date() });
-      continue;
-    }
 
     const bulkOps = rawProps.map((rp) => {
       const norm = adapter.normalizeProp(rp);
@@ -118,8 +126,23 @@ async function run() {
     }
   }
 
-  logger.info(`✅ [${SPORT.toUpperCase()}PropWatcher] Done — ${totalUpserted} props`);
-  return { upserted: totalUpserted };
+  const quotaRemaining = Number.isFinite(adapter.oddsApiQuotaRemaining)
+    ? adapter.oddsApiQuotaRemaining : 'unknown';
+  logger.info(
+    `✅ [${SPORT.toUpperCase()}PropWatcher] Done — ${totalUpserted} props ` +
+    `(games=${games.length}, attempted=${attempted}, ` +
+    `skippedByPolicy=${skippedByPolicy}, skippedEmpty=${skippedEmpty}, ` +
+    `engaged=${engagedEventIds.size}, oddsApiQuotaRemaining=${quotaRemaining})`
+  );
+  return {
+    upserted: totalUpserted,
+    games: games.length,
+    attempted,
+    skippedByPolicy,
+    skippedEmpty,
+    engaged: engagedEventIds.size,
+    oddsApiQuotaRemaining: quotaRemaining,
+  };
 }
 
 async function _invalidateMovedLines(oddsEventId, rawProps, adapter) {

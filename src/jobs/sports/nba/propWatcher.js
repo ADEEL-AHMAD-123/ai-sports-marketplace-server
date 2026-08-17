@@ -63,14 +63,26 @@ async function run() {
   // Engaged games (insights / recent views) earn the fast 10-min cadence.
   const engagedEventIds = await getEngagedEventIds(games, now);
 
-  let totalUpserted = 0;
+  // Diagnostic counters — same shape as the MLB watcher so the admin
+  // JobsPage summariser can render a rich "why 0 props?" answer.
+  let totalUpserted   = 0;
+  let skippedByPolicy = 0;
+  let skippedEmpty    = 0;
+  let attempted       = 0;
 
   for (const game of games) {
     const engaged = engagedEventIds.has(String(game.oddsEventId));
-    if (!shouldFetchPropsForGame(game, now, { engaged })) continue;
+    if (!shouldFetchPropsForGame(game, now, { engaged })) { skippedByPolicy += 1; continue; }
 
+    attempted += 1;
     const rawProps = await adapter.fetchProps(game.oddsEventId);
-    if (!rawProps.length) continue;
+    if (!rawProps.length) {
+      // Stamp propsLastFetchedAt so we don't re-attempt on the next cycle
+      // if the sportsbook simply has no markets right now.
+      await Game.findByIdAndUpdate(game._id, { hasProps: false, propsLastFetchedAt: new Date() });
+      skippedEmpty += 1;
+      continue;
+    }
 
     // NBA requires team param for player ID resolution
     const uniqueNames = [...new Set(rawProps.map(p => p.playerName))];
@@ -145,8 +157,23 @@ async function run() {
     }
   }
 
-  logger.info(`✅ [${SPORT}PropWatcher] Done — ${totalUpserted} props`);
-  return { upserted: totalUpserted };
+  const quotaRemaining = Number.isFinite(adapter.oddsApiQuotaRemaining)
+    ? adapter.oddsApiQuotaRemaining : 'unknown';
+  logger.info(
+    `✅ [${SPORT}PropWatcher] Done — ${totalUpserted} props ` +
+    `(games=${games.length}, attempted=${attempted}, ` +
+    `skippedByPolicy=${skippedByPolicy}, skippedEmpty=${skippedEmpty}, ` +
+    `engaged=${engagedEventIds.size}, oddsApiQuotaRemaining=${quotaRemaining})`
+  );
+  return {
+    upserted: totalUpserted,
+    games: games.length,
+    attempted,
+    skippedByPolicy,
+    skippedEmpty,
+    engaged: engagedEventIds.size,
+    oddsApiQuotaRemaining: quotaRemaining,
+  };
 }
 
 async function _invalidateMovedLines(oddsEventId, rawProps, adapter) {
