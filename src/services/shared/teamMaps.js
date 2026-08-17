@@ -255,7 +255,7 @@ const SOCCER_TEAMS = {
   'Minnesota United':        { id: 1596, abbr: 'min' },
   'CF Montreal':             { id: 1614, abbr: 'mtl' },
   'Montreal Impact':         { id: 1614, abbr: 'mtl' },
-  'Nashville SC':            { id: 18314, abbr: 'nsh' },
+  'Nashville SC':            { id: 1710, abbr: 'nsh' },
   'New England Revolution':  { id: 1615, abbr: 'ne'  },
   'New York City FC':        { id: 1611, abbr: 'nyc' },
   'New York Red Bulls':      { id: 1613, abbr: 'nyr' },
@@ -276,14 +276,16 @@ const SOCCER_TEAMS = {
   'Vancouver Whitecaps FC':  { id: 1598, abbr: 'van' },
   'Vancouver Whitecaps':     { id: 1598, abbr: 'van' },
 
-  // Segunda / Liga F variants seen in the current Odds-API feed. IDs
-  // omitted where uncertain — ESPN CDN fallback kicks in via abbr.
-  'Elche CF':                { abbr: 'elc' },
-  'Elche':                   { abbr: 'elc' },
-  'Deportivo La Coruña':     { abbr: 'dep' },
-  'Deportivo La Coruna':     { abbr: 'dep' },
-  'Malaga':                  { abbr: 'mal' },
-  'Málaga':                  { abbr: 'mal' },
+  // Segunda / Liga F variants — no confirmed API-Sports IDs, so use
+  // explicit Wikipedia Commons SVG URLs (stable, no auth). Falls back to
+  // the abbreviation-based ESPN URL if the Wikipedia path 404s, then to
+  // initials via the frontend's TeamLogo onError.
+  'Elche CF':                { abbr: 'elc', logoUrl: 'https://upload.wikimedia.org/wikipedia/en/thumb/1/1c/Elche_CF_logo.svg/200px-Elche_CF_logo.svg.png' },
+  'Elche':                   { abbr: 'elc', logoUrl: 'https://upload.wikimedia.org/wikipedia/en/thumb/1/1c/Elche_CF_logo.svg/200px-Elche_CF_logo.svg.png' },
+  'Deportivo La Coruña':     { abbr: 'dep', logoUrl: 'https://upload.wikimedia.org/wikipedia/en/thumb/f/f3/RC_Deportivo_La_Coru%C3%B1a_logo.svg/200px-RC_Deportivo_La_Coru%C3%B1a_logo.svg.png' },
+  'Deportivo La Coruna':     { abbr: 'dep', logoUrl: 'https://upload.wikimedia.org/wikipedia/en/thumb/f/f3/RC_Deportivo_La_Coru%C3%B1a_logo.svg/200px-RC_Deportivo_La_Coru%C3%B1a_logo.svg.png' },
+  'Malaga':                  { abbr: 'mal', logoUrl: 'https://upload.wikimedia.org/wikipedia/en/thumb/e/ed/M%C3%A1laga_CF.svg/200px-M%C3%A1laga_CF.svg.png' },
+  'Málaga':                  { abbr: 'mal', logoUrl: 'https://upload.wikimedia.org/wikipedia/en/thumb/e/ed/M%C3%A1laga_CF.svg/200px-M%C3%A1laga_CF.svg.png' },
 
   // ─── La Liga (additional teams from Odds-API feed) ────────────────────
   'Athletic Bilbao':         { id: 531, abbr: 'ath' },
@@ -332,7 +334,7 @@ const SOCCER_TEAMS = {
   // (verified — Napoli is the well-known club at that ID). Parma / Monza /
   // Empoli IDs are less certain; dropping to let ESPN fallback handle so
   // wrong crests don't appear.
-  'Monza':                   { abbr: 'mon' },
+  'Monza':                   { id: 1579, abbr: 'mon' },
   'Como':                    { id: 895, abbr: 'com' },
   'Genoa':                   { id: 495, abbr: 'gen' },
   'Empoli':                  { abbr: 'emp' },
@@ -387,12 +389,33 @@ const SOCCER_TEAMS = {
   // Hull IDs I'm not confident about, so we drop them and let ESPN CDN
   // fallback handle. Ipswich reuses id 57 which is confirmed.
   'Coventry City':           { abbr: 'cov' },
-  'Hull City':               { abbr: 'hul' },
+  'Hull City':               { id: 62, abbr: 'hul' },
   'Leeds United':            { id: 63,  abbr: 'lee' },
   'Ipswich Town':            { id: 57,  abbr: 'ips' },
 
   // ─── MLS 2025 expansion side ──────────────────────────────────────────
-  'San Diego FC':            { abbr: 'sd' },   // id unknown yet — ESPN fallback via abbr
+  'San Diego FC':            {
+    abbr:    'sd',
+    logoUrl: 'https://upload.wikimedia.org/wikipedia/en/thumb/9/9d/San_Diego_FC_crest.svg/200px-San_Diego_FC_crest.svg.png',
+  },
+
+  // ─── Segunda / lower-tier explicit-URL entries ────────────────────────
+  'Real Racing Club de Santander': {
+    abbr:    'rac',
+    logoUrl: 'https://upload.wikimedia.org/wikipedia/en/thumb/c/c2/Racing_de_Santander_logo.svg/200px-Racing_de_Santander_logo.svg.png',
+  },
+  'Racing Santander': {
+    abbr:    'rac',
+    logoUrl: 'https://upload.wikimedia.org/wikipedia/en/thumb/c/c2/Racing_de_Santander_logo.svg/200px-Racing_de_Santander_logo.svg.png',
+  },
+  'Le Mans FC': {
+    abbr:    'lem',
+    logoUrl: 'https://upload.wikimedia.org/wikipedia/en/thumb/e/e3/Le_Mans_FC_logo.svg/200px-Le_Mans_FC_logo.svg.png',
+  },
+  'Paris FC': {
+    abbr:    'pfc',
+    logoUrl: 'https://upload.wikimedia.org/wikipedia/en/thumb/6/60/Paris_FC_logo_%282024%29.svg/200px-Paris_FC_logo_%282024%29.svg.png',
+  },
 };
 
 // ─── Lookup helpers ───────────────────────────────────────────────────────────
@@ -443,31 +466,37 @@ const getTeamAbbr = (sport, name) => {
 /**
  * Get a logo URL for a team, trying the most reliable source first.
  *
- * Soccer resolution order:
- *   1. API-Sports football CDN using hardcoded team `id`
- *      (media.api-sports.io/football/teams/{id}.png — public image, works
+ * Resolution order (soccer):
+ *   1. Explicit `logoUrl` override on the team entry (highest priority —
+ *      used for teams where no source-built URL works reliably; typically
+ *      a Wikipedia Commons SVG or the club's own asset URL)
+ *   2. API-Sports football CDN using the hardcoded team `id`
+ *      (media.api-sports.io/football/teams/{id}.png — public, works
  *       without an API-Sports subscription)
- *   2. ESPN CDN using the team abbreviation as a final fallback
- *      (a.espncdn.com/i/teamlogos/soccer/500/{abbr}.png — some URLs 404,
- *       frontend's <TeamLogo onError> falls through to initials)
+ *   3. ESPN CDN using the team abbreviation
+ *      (a.espncdn.com/i/teamlogos/soccer/500/{abbr}.png — best-effort;
+ *       some codes 404, frontend's <TeamLogo onError> falls to initials)
  *
- * Non-soccer sports: uses ESPN CDN with either the sport's known `espn`
- * code or the abbreviation.
+ * Non-soccer sports honor `logoUrl` override too, then fall back to the
+ * standard ESPN CDN path built from `espn` code or `abbr`.
  *
  * @returns {string|null} Full HTTPS URL, or null if we can't build one.
  */
 const getTeamLogoUrl = (sport, name) => {
+  const team = TEAM_MAPS[sport]?.[name];
+
+  // 1. Explicit override — always wins if set.
+  if (team?.logoUrl) return team.logoUrl;
+
   if (sport === 'soccer') {
+    // 2. API-Sports football CDN via hardcoded id.
     const apiSportsUrl = getApiSportsLogoUrl(sport, name);
     if (apiSportsUrl) return apiSportsUrl;
-    // Fallback to ESPN's soccer CDN. This is best-effort — codes for some
-    // teams (particularly newer MLS expansion sides) don't exist there,
-    // in which case the frontend's TeamLogo onError shows initials.
-    const abbr = TEAM_MAPS.soccer?.[name]?.abbr;
-    if (abbr) return `https://a.espncdn.com/i/teamlogos/soccer/500/${abbr.toLowerCase()}.png`;
+    // 3. ESPN CDN via abbreviation.
+    if (team?.abbr) return `https://a.espncdn.com/i/teamlogos/soccer/500/${team.abbr.toLowerCase()}.png`;
     return null;
   }
-  const team = TEAM_MAPS[sport]?.[name];
+
   if (!team) return null;
   const espnCode = team.espn || team.abbr;   // NHL entries only have abbr
   if (!espnCode) return null;

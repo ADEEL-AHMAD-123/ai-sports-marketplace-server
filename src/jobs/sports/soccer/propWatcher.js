@@ -61,6 +61,12 @@ async function run() {
   // a Mongo update only when a logo actually changed.
   const backfillWindowHours = Math.max(48, parseInt(process.env.GAME_LIST_WINDOW_HOURS || '168', 10));
   const backfillEnd = new Date(now.getTime() + backfillWindowHours * 60 * 60 * 1000);
+  // Filter: pick up games that either (a) have a null/missing logoUrl or
+  // (b) currently point to the ESPN CDN fallback. Case (b) matters because
+  // once a team gets a hardcoded api-sports.io ID added to SOCCER_TEAMS,
+  // we want to upgrade the stored URL from the "best-effort ESPN slug"
+  // (which may 404) to the reliable API-Sports CDN URL. Without this the
+  // stored ESPN URL sticks forever even after we've added a better ID.
   const displayWindowGames = await Game.find({
     sport: SPORT,
     oddsEventId: { $exists: true, $ne: null },
@@ -71,6 +77,8 @@ async function run() {
       { 'awayTeam.logoUrl': { $in: [null, ''] } },
       { 'homeTeam.logoUrl': { $exists: false } },
       { 'awayTeam.logoUrl': { $exists: false } },
+      { 'homeTeam.logoUrl': { $regex: 'espncdn\\.com' } },
+      { 'awayTeam.logoUrl': { $regex: 'espncdn\\.com' } },
     ],
   }).lean();
   await _backfillTeamLogos(displayWindowGames, adapter, logger);
@@ -202,15 +210,35 @@ async function run() {
  * the game has a resolvable leagueId. We batch the directory lookup per
  * league so a 78-game slate across 6 leagues does at most 6 Redis reads.
  */
+// A logo URL is considered "upgradeable" if it's null/empty OR still points
+// to the ESPN CDN best-effort fallback. Any other source (api-sports.io,
+// Wikipedia Commons, an explicit team-map override) is treated as a
+// known-good URL and should replace the ESPN fallback if one exists.
+const _isEspnFallbackUrl = (url) => typeof url === 'string' && /espncdn\.com/i.test(url);
+const _isUpgradeableLogoUrl = (url) => !url || _isEspnFallbackUrl(url);
+const _isBetterLogoUrl      = (candidate, current) => {
+  if (!candidate) return false;
+  if (candidate === current) return false;
+  if (!current) return true;                                      // null → any URL is better
+  if (_isEspnFallbackUrl(current) && !_isEspnFallbackUrl(candidate)) return true;
+  return false;                                                    // don't downgrade or side-grade
+};
+
 async function _backfillTeamLogos(games, adapter, log) {
   const needFill = games.filter((g) => (
-    g?.leagueId && (!g.homeTeam?.logoUrl || !g.awayTeam?.logoUrl)
+    g?.leagueId && (
+      _isUpgradeableLogoUrl(g.homeTeam?.logoUrl) ||
+      _isUpgradeableLogoUrl(g.awayTeam?.logoUrl)
+    )
   ));
 
   // Games that need backfill but have no leagueId — flag once so we know
   // the data is malformed rather than silently ignoring.
   const missingLeagueId = games.filter((g) => (
-    !g?.leagueId && (!g.homeTeam?.logoUrl || !g.awayTeam?.logoUrl)
+    !g?.leagueId && (
+      _isUpgradeableLogoUrl(g.homeTeam?.logoUrl) ||
+      _isUpgradeableLogoUrl(g.awayTeam?.logoUrl)
+    )
   ));
   if (missingLeagueId.length) {
     log.warn(
@@ -259,23 +287,26 @@ async function _backfillTeamLogos(games, adapter, log) {
     if (Object.keys(directory).length === 0) noDirectory += 1;
 
     try {
-      const homeMissing = !game.homeTeam?.logoUrl;
-      const awayMissing = !game.awayTeam?.logoUrl;
-      const refreshedHome = homeMissing && game.homeTeam?.name
+      // Consider a slot "upgradeable" if it's null OR still using the ESPN
+      // CDN fallback — either state should be replaced with a better URL
+      // if we can resolve one from the static map / directory.
+      const homeUpgradeable = _isUpgradeableLogoUrl(game.homeTeam?.logoUrl);
+      const awayUpgradeable = _isUpgradeableLogoUrl(game.awayTeam?.logoUrl);
+      const refreshedHome = homeUpgradeable && game.homeTeam?.name
         ? adapter._resolveTeamFromDirectory(game.homeTeam.name, directory)
         : null;
-      const refreshedAway = awayMissing && game.awayTeam?.name
+      const refreshedAway = awayUpgradeable && game.awayTeam?.name
         ? adapter._resolveTeamFromDirectory(game.awayTeam.name, directory)
         : null;
       const updates = {};
-      if (refreshedHome?.logoUrl && refreshedHome.logoUrl !== game.homeTeam?.logoUrl) {
+      if (_isBetterLogoUrl(refreshedHome?.logoUrl, game.homeTeam?.logoUrl)) {
         updates.homeTeam = { ...game.homeTeam, ...refreshedHome };
-      } else if (homeMissing && game.homeTeam?.name) {
+      } else if (homeUpgradeable && !refreshedHome?.logoUrl && game.homeTeam?.name) {
         missedNames.add(game.homeTeam.name);
       }
-      if (refreshedAway?.logoUrl && refreshedAway.logoUrl !== game.awayTeam?.logoUrl) {
+      if (_isBetterLogoUrl(refreshedAway?.logoUrl, game.awayTeam?.logoUrl)) {
         updates.awayTeam = { ...game.awayTeam, ...refreshedAway };
-      } else if (awayMissing && game.awayTeam?.name) {
+      } else if (awayUpgradeable && !refreshedAway?.logoUrl && game.awayTeam?.name) {
         missedNames.add(game.awayTeam.name);
       }
       if (Object.keys(updates).length) {
