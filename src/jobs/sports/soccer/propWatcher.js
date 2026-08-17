@@ -48,18 +48,32 @@ async function run() {
   let totalUpserted = 0;
   const touchedEventIds = new Set();
 
-  // ── Team-logo backfill (runs BEFORE the policy gate) ────────────────
-  // For every soccer game in the tracked window — including those the
-  // polling policy will skip this cycle — refresh team names/logos from
-  // the (Redis-cached) API-Sports league directory if either team is
-  // missing a logo. This is the reason MLS games 2+ days out were still
-  // showing blank crests: they never get a prop fetch (correctly — outside
-  // the 30h refresh window) so the previous placement of this backfill
-  // inside the fetch path never ran on them.
+  // ── Team-logo backfill (runs across the FULL display window) ─────────
+  // The propWatcher's `games` list is scoped to the 48h track window — so
+  // limiting backfill to those games would leave MLS games 3-7 days out
+  // showing blank crests on the slate even though the frontend renders
+  // them. Query the wider display window (matches GAME_LIST_WINDOW_HOURS
+  // used by odds.controller.getGames) so every game the user can see gets
+  // a logo backfill attempt.
   //
-  // Cost: zero new Odds API calls; a single Redis GET per league (cached
-  // 24h) plus a Mongo update only when a logo actually changed.
-  await _backfillTeamLogos(games, adapter, logger);
+  // Cost: zero new Odds API calls; a Redis GET per league (cached 24h,
+  // with a previous-season fallback if the current season is empty) plus
+  // a Mongo update only when a logo actually changed.
+  const backfillWindowHours = Math.max(48, parseInt(process.env.GAME_LIST_WINDOW_HOURS || '168', 10));
+  const backfillEnd = new Date(now.getTime() + backfillWindowHours * 60 * 60 * 1000);
+  const displayWindowGames = await Game.find({
+    sport: SPORT,
+    oddsEventId: { $exists: true, $ne: null },
+    startTime: { $gte: new Date(now.getTime() - 3 * 60 * 60 * 1000), $lte: backfillEnd },
+    status: { $in: [GAME_STATUS.SCHEDULED, GAME_STATUS.LIVE] },
+    $or: [
+      { 'homeTeam.logoUrl': { $in: [null, ''] } },
+      { 'awayTeam.logoUrl': { $in: [null, ''] } },
+      { 'homeTeam.logoUrl': { $exists: false } },
+      { 'awayTeam.logoUrl': { $exists: false } },
+    ],
+  }).lean();
+  await _backfillTeamLogos(displayWindowGames, adapter, logger);
 
   const results = await _mapGamesWithConcurrency(games, async (game) => {
     try {

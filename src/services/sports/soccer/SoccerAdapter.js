@@ -559,11 +559,31 @@ class SoccerAdapter extends BaseAdapter {
   }
 
   async _getLeagueTeamDirectory(leagueId, seasonYear) {
+    // Try current season first, then fall back to the previous season if
+    // API-Sports doesn't have current-year data yet (common for MLS in the
+    // first couple months of a season, or European leagues where the
+    // 2026/27 roster isn't published until August). Team IDs and logos
+    // don't change year to year, so a prior-season directory is a good
+    // proxy — the goal is just to resolve name → logo URL.
+    const primary = await this._fetchLeagueDirectory(leagueId, seasonYear);
+    if (Object.keys(primary).length > 0) return primary;
+
+    const fallbackYear = seasonYear - 1;
+    logger.info(
+      `[SOCCER] League ${leagueId} directory empty for season ${seasonYear} — trying ${fallbackYear}`
+    );
+    const fallback = await this._fetchLeagueDirectory(leagueId, fallbackYear);
+    return fallback; // may still be empty; caller handles that
+  }
+
+  /**
+   * One-shot fetch for a single (leagueId, seasonYear) with cache. Only
+   * caches non-empty results — an empty {} would poison the cache for 24h
+   * if the very first fetch failed or hit a transient API-Sports outage.
+   */
+  async _fetchLeagueDirectory(leagueId, seasonYear) {
     const cacheKey = `soccer:league-team-directory:${leagueId}:${seasonYear}`;
     const cached = await cacheGet(cacheKey);
-    // Only trust NON-EMPTY cached directories. An empty {} would poison the
-    // cache for 24h if the very first fetch failed or hit a transient
-    // API-Sports outage (or requested a season API-Sports doesn't have yet).
     if (cached && typeof cached === 'object' && Object.keys(cached).length > 0) {
       return cached;
     }
@@ -582,8 +602,6 @@ class SoccerAdapter extends BaseAdapter {
       };
     }
 
-    // Only cache non-empty results. If API-Sports gave us nothing we let
-    // the next caller retry rather than sitting on {} for a day.
     if (Object.keys(directory).length > 0) {
       await cacheSet(cacheKey, directory, TEAM_DIRECTORY_CACHE_TTL);
     } else {
