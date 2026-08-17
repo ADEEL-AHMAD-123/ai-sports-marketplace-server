@@ -183,7 +183,9 @@ const SOCCER_TEAMS = {
   'Atletico Madrid':         { id: 530, abbr: 'atm' },
   'Atlético Madrid':         { id: 530, abbr: 'atm' },
   'Celta Vigo':              { id: 538, abbr: 'cel' },
-  'VfL Wolfsburg':           { id: 161, abbr: 'wol' },
+  // Wolfsburg uses 'wob' (their standard Bundesliga code) so it doesn't
+  // collide with Wolverhampton (Wolves) also using 'wol' in the EPL.
+  'VfL Wolfsburg':           { id: 161, abbr: 'wob' },
   'Bayern Munich':           { id: 157, abbr: 'bay' },
   'Bayern München':          { id: 157, abbr: 'bay' },
   'Toronto FC':              { id: 1601, abbr: 'tor' },
@@ -192,7 +194,10 @@ const SOCCER_TEAMS = {
   'Lazio':                   { id: 487, abbr: 'laz' },
   'Inter Milan':             { id: 505, abbr: 'int' },
   'Inter':                   { id: 505, abbr: 'int' },
-  'Sunderland':              { id: 49,  abbr: 'sun' },
+  // Sunderland — API-Sports football ID varies by data source, and 49 was
+  // colliding with Chelsea. Dropping the ID; ESPN CDN fallback handles the
+  // crest via abbr, initials via onError if that also 404s.
+  'Sunderland':              { abbr: 'sun' },
   'Arsenal':                 { id: 42, abbr: 'ars' },
   'Aston Villa':             { id: 66, abbr: 'avl' },
   'Bournemouth':             { id: 35, abbr: 'bou' },
@@ -258,7 +263,9 @@ const SOCCER_TEAMS = {
   'Philadelphia Union':      { id: 1617, abbr: 'phi' },
   'Portland Timbers':        { id: 1607, abbr: 'por' },
   'Real Salt Lake':          { id: 1606, abbr: 'rsl' },
-  'San Jose Earthquakes':    { id: 1601, abbr: 'sj'  },
+  // San Jose — dropping the incorrect ID (was colliding with Toronto FC's
+  // 1601). ESPN CDN fallback via abbr; onError → initials if that misses.
+  'San Jose Earthquakes':    { abbr: 'sj'  },
   'Seattle Sounders FC':     { id: 1609, abbr: 'sea' },
   'Seattle Sounders':        { id: 1609, abbr: 'sea' },
   'Sporting Kansas City':    { id: 1612, abbr: 'skc' },
@@ -276,6 +283,85 @@ const SOCCER_TEAMS = {
   'Deportivo La Coruna':     { abbr: 'dep' },
   'Malaga':                  { abbr: 'mal' },
   'Málaga':                  { abbr: 'mal' },
+
+  // ─── La Liga (additional teams from Odds-API feed) ────────────────────
+  'Athletic Bilbao':         { id: 531, abbr: 'ath' },
+  'Athletic Club':           { id: 531, abbr: 'ath' },
+  'Real Betis':              { id: 543, abbr: 'bet' },
+  'Real Sociedad':           { id: 548, abbr: 'rso' },
+  'Rayo Vallecano':          { id: 728, abbr: 'ray' },
+  'Alavés':                  { id: 542, abbr: 'ala' },
+  'Alaves':                  { id: 542, abbr: 'ala' },
+  'Valencia':                { id: 532, abbr: 'val' },
+
+  // ─── Serie A ──────────────────────────────────────────────────────────
+  'AC Milan':                { id: 489, abbr: 'mil' },
+  'Milan':                   { id: 489, abbr: 'mil' },
+  'AS Roma':                 { id: 497, abbr: 'rom' },
+  'Roma':                    { id: 497, abbr: 'rom' },
+  'Juventus':                { id: 496, abbr: 'juv' },
+  'Fiorentina':              { id: 502, abbr: 'fio' },
+  'Atalanta':                { id: 499, abbr: 'ata' },
+  'Atalanta BC':             { id: 499, abbr: 'ata' },
+  // Torino uses 'tori' (not 'tor') so it doesn't collide with Toronto FC's
+  // 'tor' abbreviation on the frontend — different clubs entirely, and
+  // matching abbreviations were confusing on the multi-sport slate.
+  'Torino':                  { id: 503, abbr: 'tori' },
+  'Bologna':                 { id: 500, abbr: 'bol' },
+  'Sassuolo':                { id: 488, abbr: 'sas' },
+  'Udinese':                 { id: 494, abbr: 'udi' },
+  'Lecce':                   { id: 867, abbr: 'lec' },
+  'Frosinone':               { id: 512, abbr: 'fro' },
+  'Venezia':                 { id: 517, abbr: 'ven' },
+  // Monza / Empoli — 511 was duplicated across both. Napoli is 492
+  // (verified — Napoli is the well-known club at that ID). Parma / Monza /
+  // Empoli IDs are less certain; dropping to let ESPN fallback handle so
+  // wrong crests don't appear.
+  'Monza':                   { abbr: 'mon' },
+  'Como':                    { id: 895, abbr: 'com' },
+  'Genoa':                   { id: 495, abbr: 'gen' },
+  'Empoli':                  { abbr: 'emp' },
+  'Cagliari':                { id: 490, abbr: 'cag' },
+  'Verona':                  { id: 504, abbr: 'ver' },
+  'Hellas Verona':           { id: 504, abbr: 'ver' },
+  'Parma':                   { abbr: 'par' },
+  'Napoli':                  { id: 492, abbr: 'nap' },
+
+  // ─── Ligue 1 (France) ─────────────────────────────────────────────────
+  'Marseille':               { id: 81,  abbr: 'mar' },
+  'Olympique Marseille':     { id: 81,  abbr: 'mar' },
+  'Strasbourg':              { id: 95,  abbr: 'str' },
+  'RC Lens':                 { id: 116, abbr: 'len' },
+  'Lens':                    { id: 116, abbr: 'len' },
+  'Auxerre':                 { id: 108, abbr: 'aux' },
+  'Paris Saint Germain':     { id: 85,  abbr: 'psg' },
+  'PSG':                     { id: 85,  abbr: 'psg' },
+  'Lyon':                    { id: 80,  abbr: 'lyo' },
+  'Olympique Lyonnais':      { id: 80,  abbr: 'lyo' },
+  'Monaco':                  { id: 91,  abbr: 'mco' },
+  'AS Monaco':               { id: 91,  abbr: 'mco' },
+  'Nice':                    { id: 84,  abbr: 'nic' },
+  'Lille':                   { id: 79,  abbr: 'lil' },
+  'Rennes':                  { id: 94,  abbr: 'ren' },
+  'Nantes':                  { id: 83,  abbr: 'nte' },
+  'Toulouse':                { id: 96,  abbr: 'tou' },
+  'Reims':                   { id: 93,  abbr: 'rei' },
+  'Montpellier':             { id: 82,  abbr: 'mtp' },
+
+  // ─── EFL Championship teams seen in the EPL feed ──────────────────────
+  // The Odds API's soccer_epl feed sometimes includes recently-promoted or
+  // relegated sides during the transition window. Adding IDs so their
+  // crests still render.
+  // Championship crossover — Leeds keeps id 63 (verified). Coventry and
+  // Hull IDs I'm not confident about, so we drop them and let ESPN CDN
+  // fallback handle. Ipswich reuses id 57 which is confirmed.
+  'Coventry City':           { abbr: 'cov' },
+  'Hull City':               { abbr: 'hul' },
+  'Leeds United':            { id: 63,  abbr: 'lee' },
+  'Ipswich Town':            { id: 57,  abbr: 'ips' },
+
+  // ─── MLS 2025 expansion side ──────────────────────────────────────────
+  'San Diego FC':            { abbr: 'sd' },   // id unknown yet — ESPN fallback via abbr
 };
 
 // ─── Lookup helpers ───────────────────────────────────────────────────────────
