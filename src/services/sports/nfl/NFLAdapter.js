@@ -3,16 +3,33 @@
  *
  * DATA SOURCES:
  *  Props/Schedule → The Odds API (americanfootball_nfl)
- *  Stats          → API-Sports American Football v1
+ *  Stats          → ESPN public API (per-game gamelog) — DEFAULT
+ *                   Legacy API-Sports path still callable via
+ *                   USE_ESPN_STATS_NFL=false env override
+ *
+ * WHY THE ESPN PATH IS DEFAULT:
+ *   API-Sports' `players/statistics` endpoint returns season aggregates
+ *   (career-by-team totals) but our downstream scoring code (StrategyService,
+ *   NFLFormulas) treats the response as an array of PER-GAME rows. That
+ *   mismatch produced misleading confidence + HC/BV tags for NFL.
+ *   ESPN's `/athletes/{id}/gamelog` returns real per-game rows with the
+ *   fields our formulas already know how to read (passingYards, rushingYards,
+ *   receivingYards, receptions, passingTouchdowns).
  */
 
 const BaseAdapter = require('../../shared/BaseAdapter');
 const axios = require('axios');
 const logger = require('../../../config/logger');
 const ApiSportsClient = require('../../shared/ApiSportsClient');
+const ESPNClient      = require('../../shared/ESPNClient');
+const ESPNPlayerResolver = require('../../shared/ESPNPlayerResolver');
 const { applyNFLFormulas, buildNFLPrompt } = require('./NFLFormulas');
 const { nflSeasonYear } = require('./nflSeason');
 const { getTeamId, getTeamAbbr, getTeamLogoUrl, getApiSportsLogoUrl } = require('../../shared/teamMaps');
+
+// Feature flag — default TRUE (ESPN). Set USE_ESPN_STATS_NFL=false to
+// force the legacy API-Sports path (useful if ESPN has an outage).
+const USE_ESPN_STATS = String(process.env.USE_ESPN_STATS_NFL ?? 'true').toLowerCase() !== 'false';
 
 const NFL_MARKET_MAP = {
   player_pass_yds: 'passing_yards',
@@ -161,13 +178,19 @@ class NFLAdapter extends BaseAdapter {
     return match ? { line: match.line, isAvailable: true } : { line: null, isAvailable: false };
   }
 
-  async fetchPlayerStats({ playerId, season }) {
-    if (!playerId) return [];
-
+  async fetchPlayerStats({ playerId, playerName, homeTeamName, awayTeamName, season } = {}) {
     // NFL seasons are start-year based — using the raw calendar year would
     // request a not-yet-started season for every Jan–Jul game and burn an
     // API call on the empty result before the yr-1 fallback corrects it.
     const yr = season || nflSeasonYear();
+
+    // ── ESPN path (default) ────────────────────────────────────────────
+    if (USE_ESPN_STATS) {
+      return this._fetchStatsFromESPN({ playerName, homeTeamName, awayTeamName, season: yr });
+    }
+
+    // ── Legacy API-Sports path (behind USE_ESPN_STATS_NFL=false) ───────
+    if (!playerId) return [];
 
     try {
       const { cacheGet, cacheSet } = require('../../../config/redis');
@@ -175,20 +198,235 @@ class NFLAdapter extends BaseAdapter {
       const cached = await cacheGet(cacheKey);
       if (cached?.length > 0) return cached;
 
-      let stats = await this.statsClient.get('players/statistics', { id: playerId, season: yr });
-      if (!stats?.length) {
-        // Early-season fallback: a player with no games in the current
-        // season yet — fetch the prior season so form windows aren't empty.
-        stats = await this.statsClient.get('players/statistics', { id: playerId, season: yr - 1 });
+      // Multi-year fallback chain. API-Sports FREE tier for American
+      // Football only allows seasons 2022-2024; paid tiers unlock current
+      // + prior. So a plan mismatch (current-year blocked) leaves us
+      // walking back until we hit an allowed season. Two-year fallback
+      // keeps insights non-empty even on the free plan, at the cost of
+      // reasoning about aged data. The `usedSeason` log line makes it
+      // obvious in the log which year the data actually came from — if
+      // you're consistently seeing yr-2 or older, you need to upgrade
+      // the API-Sports American Football plan.
+      const seasonsToTry = [yr, yr - 1, yr - 2];
+      let stats = [];
+      let usedSeason = null;
+      for (const trySeason of seasonsToTry) {
+        try {
+          const result = await this.statsClient.get('players/statistics', { id: playerId, season: trySeason });
+          if (result?.length) {
+            stats = result;
+            usedSeason = trySeason;
+            break;
+          }
+        } catch (fetchErr) {
+          logger.debug(`[NFL] fetchPlayerStats season ${trySeason} threw`, {
+            playerId, error: fetchErr.message,
+          });
+          // continue to next season
+        }
       }
 
-      if (stats?.length) await cacheSet(cacheKey, stats, 6 * 60 * 60);
-      logger.info(`✅ [NFL] ${stats?.length || 0} game records for player ${playerId}`);
+      if (stats?.length) {
+        await cacheSet(cacheKey, stats, 6 * 60 * 60);
+        // Warn (not info) when we had to fall back — this is a plan-tier
+        // signal worth surfacing in the log stream.
+        if (usedSeason && usedSeason < yr) {
+          logger.warn(
+            `⚠️  [NFL] Using ${usedSeason} stats for player ${playerId} — current-season data unavailable ` +
+            `(likely API-Sports plan-tier limit; upgrade to unlock ${yr} data).`
+          );
+        } else {
+          logger.info(`✅ [NFL] ${stats.length} game records for player ${playerId} (season ${usedSeason})`);
+        }
+      } else {
+        logger.warn(`⚠️  [NFL] No stats found for player ${playerId} across ${seasonsToTry.join(', ')}`);
+      }
       return stats || [];
     } catch (err) {
       logger.error('❌ [NFL] fetchPlayerStats failed', { playerId, error: err.message });
       return [];
     }
+  }
+
+  /**
+   * ESPN-backed stats path. Resolves the player to an ESPN athlete ID via
+   * team roster lookup, then pulls their per-game log for the current
+   * (and if empty, prior) season. Returns rows in a shape NFLFormulas
+   * can consume directly (passingYards, rushingYards, receivingYards,
+   * receptions, passingTouchdowns as top-level fields).
+   */
+  async _fetchStatsFromESPN({ playerName, homeTeamName, awayTeamName, season }) {
+    if (!playerName) {
+      logger.warn('[NFL/ESPN] fetchPlayerStats called without playerName');
+      return [];
+    }
+
+    const { cacheGet, cacheSet } = require('../../../config/redis');
+    const cacheKey = `nfl:espn-stats:${playerName.toLowerCase()}:${season}`;
+    const cached = await cacheGet(cacheKey);
+    if (cached?.length > 0) return cached;
+
+    try {
+      const athleteId = await ESPNPlayerResolver.resolve({
+        sportKey: 'nfl',
+        playerName,
+        homeTeamName,
+        awayTeamName,
+      });
+
+      if (!athleteId) {
+        logger.warn(`[NFL/ESPN] Could not resolve athlete ID for "${playerName}" (${awayTeamName} @ ${homeTeamName})`);
+        return [];
+      }
+
+      // Try current season first, fall back to prior season if empty
+      // (early-week-1 games have zero regular-season stats).
+      const seasonsToTry = [season, season - 1];
+      let rows = [];
+      let usedSeason = null;
+      for (const trySeason of seasonsToTry) {
+        try {
+          const raw = await ESPNClient.gamelog('nfl', athleteId, trySeason);
+          const parsed = this._parseESPNGamelog(raw);
+          if (parsed.length > 0) { rows = parsed; usedSeason = trySeason; break; }
+        } catch (fetchErr) {
+          logger.debug(`[NFL/ESPN] gamelog season ${trySeason} failed`, {
+            athleteId, playerName, error: fetchErr.message,
+          });
+        }
+      }
+
+      if (rows.length > 0) {
+        // ESPN game logs are stable once a game is finalized — cache for
+        // 6h during active play, longer would be fine for finalized games.
+        await cacheSet(cacheKey, rows, 6 * 60 * 60);
+        if (usedSeason && usedSeason < season) {
+          logger.warn(`⚠️  [NFL/ESPN] Using ${usedSeason} log for ${playerName} — ${season} empty`);
+        } else {
+          logger.info(`✅ [NFL/ESPN] ${rows.length} game records for ${playerName} (season ${usedSeason})`);
+        }
+      } else {
+        logger.warn(`⚠️  [NFL/ESPN] No stats for ${playerName} across ${seasonsToTry.join(', ')}`);
+      }
+      return rows;
+    } catch (err) {
+      logger.error(`❌ [NFL/ESPN] fetchPlayerStats failed for "${playerName}"`, { error: err.message });
+      return [];
+    }
+  }
+
+  /**
+   * Parse ESPN's gamelog response into a flat per-game array with the
+   * field names NFLFormulas.pick already knows how to read.
+   *
+   * ESPN returns one of TWO shapes depending on the athlete/season:
+   *
+   *   Shape A (older / regular-season centric):
+   *     {
+   *       names: ["passingYards", "rushingYards", ...],
+   *       seasonTypes: [{
+   *         displayName: "2024 Regular Season",
+   *         categories: [{
+   *           type: "event",
+   *           events: [{ eventId, week, gameDate, stats: ["263", "0", ...] }]
+   *         }]
+   *       }]
+   *     }
+   *
+   *   Shape B (newer / current NFL):
+   *     {
+   *       names: [...],
+   *       events: {
+   *         "401671889": { id, week, gameDate, opponent, stats: [...] },
+   *         "401671665": { ... }
+   *       },
+   *       seasonTypes: [{ categories: [{ events: [{ eventId, stats: [...] }] }] }]
+   *     }
+   *
+   * In shape B, the `events` map holds metadata and the seasonTypes hold
+   * the actual stats — sometimes the stats live inline in the events map,
+   * sometimes in a separate categories→events array that references by ID.
+   * We handle both, then log if we saw neither so future debugging is easy.
+   *
+   * The `stats` array on each event is parallel to the top-level `names`
+   * array — zip them to recover named fields.
+   */
+  _parseESPNGamelog(raw) {
+    if (!raw || typeof raw !== 'object') return [];
+    const names = Array.isArray(raw.names) ? raw.names : [];
+    if (!names.length) {
+      logger.warn('[NFL/ESPN] gamelog response missing "names" — cannot parse', {
+        topKeys: Object.keys(raw).slice(0, 20),
+      });
+      return [];
+    }
+
+    const rows = [];
+
+    // Path 1: seasonTypes → categories → events with inline stats
+    const seasonTypes = Array.isArray(raw.seasonTypes) ? raw.seasonTypes : [];
+    for (const st of seasonTypes) {
+      const categories = Array.isArray(st?.categories) ? st.categories : [];
+      for (const cat of categories) {
+        if (cat?.type && cat.type !== 'event') continue;
+        const events = Array.isArray(cat?.events) ? cat.events : [];
+        for (const event of events) {
+          const row = this._eventToRow(event, names);
+          if (row) rows.push(row);
+        }
+      }
+    }
+    if (rows.length > 0) return rows;
+
+    // Path 2: flat events map with inline stats
+    const eventsMap = raw.events && typeof raw.events === 'object' && !Array.isArray(raw.events)
+      ? raw.events
+      : null;
+    if (eventsMap) {
+      for (const event of Object.values(eventsMap)) {
+        const row = this._eventToRow(event, names);
+        if (row) rows.push(row);
+      }
+    }
+    if (rows.length > 0) return rows;
+
+    // Nothing matched — surface response structure so we can adapt.
+    logger.warn('[NFL/ESPN] gamelog structure unrecognized — no rows parsed', {
+      namesCount: names.length,
+      hasSeasonTypes: Array.isArray(raw.seasonTypes),
+      seasonTypesCount: (raw.seasonTypes || []).length,
+      hasEventsMap: !!eventsMap,
+      eventsMapCount: eventsMap ? Object.keys(eventsMap).length : 0,
+      topKeys: Object.keys(raw).slice(0, 20),
+    });
+    return [];
+  }
+
+  /**
+   * Zip one ESPN event object into a named-field row. Returns null when
+   * the event lacks a stats array (empty games, byes, upcoming fixtures).
+   */
+  _eventToRow(event, names) {
+    if (!event) return null;
+    const statValues = Array.isArray(event.stats) ? event.stats : [];
+    if (statValues.length === 0) return null;
+
+    const row = {
+      eventId:  event.eventId || event.id || null,
+      week:     event.week || null,
+      date:     event.gameDate || event.date || null,
+      opponent: event.opponent?.abbreviation || event.opponent?.displayName || null,
+      homeAway: event.homeAwaySymbol || (event.atVs === '@' || event.atVs === 'at' ? 'away' : 'home'),
+    };
+    for (let i = 0; i < names.length && i < statValues.length; i += 1) {
+      const key = names[i];
+      const value = statValues[i];
+      // Values are often strings like "263", "6.5" — coerce numeric,
+      // fall through to raw for non-numeric fields.
+      const num = Number(String(value).replace(/,/g, ''));
+      row[key] = Number.isFinite(num) ? num : value;
+    }
+    return row;
   }
 
   getRequiredStats() {

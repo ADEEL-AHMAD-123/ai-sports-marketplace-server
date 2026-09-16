@@ -269,6 +269,21 @@ class StrategyService {
       };
     }
 
+    if (sport === 'nfl') {
+      // Include name + team context so the ESPN stats path can resolve
+      // the player via roster lookup. Legacy API-Sports playerId is still
+      // passed through as a fallback for USE_ESPN_STATS_NFL=false.
+      return {
+        key: `nfl:${prop.playerName}:${prop.homeTeamName || ''}:${prop.awayTeamName || ''}`,
+        fetchParams: {
+          playerId:     prop.apiSportsPlayerId || null,
+          playerName:   prop.playerName,
+          homeTeamName: prop.homeTeamName,
+          awayTeamName: prop.awayTeamName,
+        },
+      };
+    }
+
     if (prop.apiSportsPlayerId) {
       return {
         key: `${sport}:id:${prop.apiSportsPlayerId}`,
