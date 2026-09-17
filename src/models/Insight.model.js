@@ -420,6 +420,10 @@ insightSchema.statics.findExisting = async function ({
   statType,
   bettingLine,
   maxAgeHours = null,
+  // NEW: include stale insights so the InsightService can regenerate them
+  // in-place (same _id). Default true so any caller checking cache-hit
+  // semantics also sees stale rows and knows to refresh them.
+  includeStale = true,
 }) {
   const query = {
     sport,
@@ -427,8 +431,10 @@ insightSchema.statics.findExisting = async function ({
     playerName,
     statType,
     bettingLine,
-    status: INSIGHT_STATUS.GENERATED,
   };
+  query.status = includeStale
+    ? { $in: [INSIGHT_STATUS.GENERATED, INSIGHT_STATUS.STALE] }
+    : INSIGHT_STATUS.GENERATED;
   if (Number.isFinite(maxAgeHours) && maxAgeHours > 0) {
     query.createdAt = { $gte: new Date(Date.now() - maxAgeHours * 3600 * 1000) };
   }

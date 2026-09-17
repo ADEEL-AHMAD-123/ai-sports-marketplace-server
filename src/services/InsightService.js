@@ -90,7 +90,18 @@ class InsightService {
       sport, eventId, playerName, statType, bettingLine,
       maxAgeHours: INSIGHT_REUSE_MAX_AGE_HOURS,
     });
-    if (existing) {
+
+    // Stale-insight handling: a prior insight exists for this exact prop
+    // but its status was flagged `stale` (usually by an ops action after
+    // a stats-source rollover). We KEEP the same _id — that way every
+    // user who unlocked the previous version still has it in their
+    // unlockedInsights array and is NOT re-charged when they reopen.
+    // Content fields (narrative, stats, confidence, etc.) get overwritten
+    // by findByIdAndUpdate later in this function. Status is bumped back
+    // to `generated` on save so cache-hits work normally afterward.
+    const staleRegenerationOfId = (existing && existing.status === 'stale') ? existing._id : null;
+
+    if (existing && !staleRegenerationOfId) {
       logger.info('⚡ [InsightService] Cache HIT', logCtx);
 
       // Per-user charging model: each user pays their own credit to unlock,
@@ -201,7 +212,13 @@ class InsightService {
       return { insight: existing, creditDeducted: cacheHitCreditDeducted, cached: true };
     }
 
-    logger.info('💨 [InsightService] Cache MISS — generating', logCtx);
+    if (staleRegenerationOfId) {
+      logger.info('♻️  [InsightService] STALE — regenerating in place (same _id, no re-charge)', {
+        ...logCtx, insightId: staleRegenerationOfId,
+      });
+    } else {
+      logger.info('💨 [InsightService] Cache MISS — generating', logCtx);
+    }
 
     // ── STEP 2: Pre-flight odds check ──────────────────────────────────────
     const preflight = await this._runPreflightCheck({ sport, eventId, playerName, statType, bettingLine });
@@ -425,7 +442,10 @@ class InsightService {
     const aiLogExpiresAt = new Date();
     aiLogExpiresAt.setDate(aiLogExpiresAt.getDate() + parseInt(process.env.AI_LOG_RETENTION_DAYS || '30', 10));
 
-    const insight = await Insight.create({
+    // Build the content payload. When we're regenerating a stale insight
+    // (same _id), we findByIdAndUpdate with $set below. Otherwise we
+    // create a fresh document. Both paths use the same field data.
+    const insightData = {
       sport,
       eventId,
       playerName,
@@ -562,8 +582,34 @@ class InsightService {
       },
       aiLogExpiresAt,
       unlockCount: 1,
-    });
+    };
 
+    let insight;
+    if (staleRegenerationOfId) {
+      // Update in place — same _id keeps users' unlockedInsights valid so
+      // nobody is re-charged. Also promote status back to `generated` and
+      // refresh createdAt so cache TTL restarts. unlockCount is $inc'd (not
+      // reset) since the original unlock still counts as one.
+      insight = await Insight.findByIdAndUpdate(
+        staleRegenerationOfId,
+        {
+          $set: {
+            ...insightData,
+            unlockCount: undefined,  // don't overwrite the counter
+            status: 'generated',
+            createdAt: new Date(),
+          },
+        },
+        { new: true }
+      );
+      logger.info('✅ [InsightService] Insight regenerated in place (no charge)', {
+        ...logCtx, insightId: insight._id,
+      });
+      // Skip credit deduction — the user's original unlock is still credited.
+      return { insight: insight.toObject(), creditDeducted: false, cached: false, regenerated: true };
+    }
+
+    insight = await Insight.create(insightData);
     logger.info('✅ [InsightService] Insight saved', { ...logCtx, insightId: insight._id });
 
     // ── STEP 10: Deduct credit ─────────────────────────────────────────────

@@ -30,6 +30,35 @@ const { AppError } = require('../middleware/errorHandler.middleware');
 const logger = require('../config/logger');
 const InsightOutcomeService = require('../services/InsightOutcomeService');
 
+/**
+ * Mark every insight of a sport as `stale`. Insight.findExisting() filters
+ * status='generated' so stale ones won't be returned — next unlock triggers
+ * regeneration via the current stats pipeline. Used after stats-source
+ * changes (like the API-Sports → ESPN NFL switch).
+ *
+ * Only mutates status. All other prediction data is preserved so the
+ * regeneration doesn't lose historical grading state.
+ */
+async function _invalidateInsightsForSport(sport) {
+  const startedAt = Date.now();
+  const filter = { sport, status: INSIGHT_STATUS.GENERATED };
+  const before = await Insight.countDocuments(filter);
+  const res = await Insight.updateMany(filter, { $set: { status: INSIGHT_STATUS.STALE } });
+  logger.info(`[Admin] Invalidated ${res.modifiedCount || 0} ${sport.toUpperCase()} insights (marked stale)`, {
+    matched: res.matchedCount || 0,
+    modified: res.modifiedCount || 0,
+    scannedGenerated: before,
+    elapsedMs: Date.now() - startedAt,
+  });
+  return {
+    sport,
+    generatedBefore: before,
+    matched: res.matchedCount || 0,
+    modified: res.modifiedCount || 0,
+    note: 'Next unlock on each affected prop will regenerate via the current stats pipeline. No user charge — original credit already spent.',
+  };
+}
+
 // ─── Platform Stats ───────────────────────────────────────────────────────────
 
 /**
@@ -445,10 +474,15 @@ const triggerCronJob = async (req, res, next) => {
       'score-nhl':          ['__direct', 'scoreNHL'],
       'score-nfl':          ['__direct', 'scoreNFL'],
       'score-soccer':       ['__direct', 'scoreSoccer'],
-      // Synthetic end-to-end tests — no DB props needed. Verifies each
-      // sport's rewritten stats pipeline works against real external
-      // services using hardcoded well-known players.
-      'test-espn-nfl':      ['__direct', 'testESPNNFL'],
+      // Mark every insight of a sport as `stale` so the next unlock
+      // regenerates via the current stats pipeline. Users are NOT
+      // re-charged — InsightService.generateInsight detects stale and
+      // updates the same _id in place, keeping unlockedInsights valid.
+      'invalidate-insights-nfl':    ['__direct', 'invalidateInsightsNFL'],
+      'invalidate-insights-nba':    ['__direct', 'invalidateInsightsNBA'],
+      'invalidate-insights-mlb':    ['__direct', 'invalidateInsightsMLB'],
+      'invalidate-insights-nhl':    ['__direct', 'invalidateInsightsNHL'],
+      'invalidate-insights-soccer': ['__direct', 'invalidateInsightsSoccer'],
       'ai-log-cleanup':     ['../jobs/orchestrators/postGameSync.job',    'runAILogCleanup'],
     };
 
@@ -469,74 +503,19 @@ const triggerCronJob = async (req, res, next) => {
       scoreNFL:    () => require('../services/StrategyService').scoreAllPropsForSport('nfl',    { force }),
       scoreSoccer: () => require('../services/StrategyService').scoreAllPropsForSport('soccer', { force }),
 
-      // Synthetic ESPN-pipeline verifier for NFL. Runs the exact code
-      // path score-nfl would run for a real prop — player-name → ESPN
-      // roster lookup → athlete-ID → gamelog fetch → parse into per-game
-      // rows — for a hand-picked list of well-known active players.
-      // No database rows required.
-      testESPNNFL: async () => {
-        const NFLAdapter = require('../services/sports/nfl/NFLAdapter');
-        const nfl = require('../services/shared/adapterRegistry').getAdapter('nfl');
-        const { nflSeasonYear } = require('../services/sports/nfl/nflSeason');
-        const season = nflSeasonYear();
-
-        // Curated: three teams, four positions, common name shapes. If any
-        // of these fail we know something specific about the ESPN pipeline.
-        const targets = [
-          { playerName: 'Patrick Mahomes',    homeTeamName: 'Kansas City Chiefs', awayTeamName: 'Buffalo Bills' },
-          { playerName: 'Josh Allen',         homeTeamName: 'Buffalo Bills',      awayTeamName: 'Kansas City Chiefs' },
-          { playerName: 'Christian McCaffrey',homeTeamName: 'San Francisco 49ers',awayTeamName: 'Los Angeles Rams' },
-          { playerName: 'Travis Kelce',       homeTeamName: 'Kansas City Chiefs', awayTeamName: 'Buffalo Bills' },
-        ];
-
-        const results = [];
-        for (const t of targets) {
-          const startedAt = Date.now();
-          let ok = false;
-          let error = null;
-          let rowCount = 0;
-          let firstRow = null;
-          try {
-            const rows = await nfl._fetchStatsFromESPN({
-              playerName:   t.playerName,
-              homeTeamName: t.homeTeamName,
-              awayTeamName: t.awayTeamName,
-              season,
-            });
-            rowCount = rows.length;
-            firstRow = rows[0] || null;
-            ok = rowCount > 0;
-          } catch (err) {
-            error = err.message;
-          }
-          results.push({
-            player:  t.playerName,
-            teams:   `${t.awayTeamName} @ ${t.homeTeamName}`,
-            season,
-            ok,
-            rowCount,
-            error,
-            elapsedMs: Date.now() - startedAt,
-            firstRow: firstRow && {
-              date:              firstRow.date,
-              opponent:          firstRow.opponent,
-              passingYards:      firstRow.passingYards ?? null,
-              rushingYards:      firstRow.rushingYards ?? null,
-              receivingYards:    firstRow.receivingYards ?? null,
-              receptions:        firstRow.receptions ?? null,
-              passingTouchdowns: firstRow.passingTouchdowns ?? null,
-            },
-          });
-        }
-
-        const passing = results.filter(r => r.ok).length;
-        return {
-          summary: `${passing}/${results.length} players resolved successfully`,
-          season,
-          results,
-        };
-      },
+      // Insight invalidator — marks every insight of a sport as `stale`
+      // so Insight.findExisting() no longer returns them (it filters
+      // status='generated'). The next unlock regenerates via the current
+      // stats pipeline without charging the user again.
+      invalidateInsightsNFL:    () => _invalidateInsightsForSport('nfl'),
+      invalidateInsightsNBA:    () => _invalidateInsightsForSport('nba'),
+      invalidateInsightsMLB:    () => _invalidateInsightsForSport('mlb'),
+      invalidateInsightsNHL:    () => _invalidateInsightsForSport('nhl'),
+      invalidateInsightsSoccer: () => _invalidateInsightsForSport('soccer'),
     };
+
+    // (Removed) testESPNNFL synthetic verifier — the ESPN NFL pipeline is
+    // now verified in production via real props + invalidate-insights-nfl.
 
     const jobEntry = JOB_MAP[job];
     if (!jobEntry) {
