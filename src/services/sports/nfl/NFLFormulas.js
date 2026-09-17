@@ -148,6 +148,14 @@ const buildNFLPrompt = ({
     teamCtxBlock,
     injuryContext ? `INJURY CONTEXT\n${injuryContext}\n` : '',
     '',
+    // Anti-hallucination guardrail — the model is only allowed to cite
+    // numbers that appear above. Prevents invented lines like "opponent
+    // allows only 31 pts/g" when no such data was supplied.
+    'RULES:',
+    '- Base every factor, risk, and stat you cite on the WINDOWS / GAME CONTEXT / MATCHUP CONTEXT above. Do NOT invent stats (yards allowed, ranks, injury details, opponent tendencies, depth-chart notes) that are not present.',
+    '- If a piece of context is missing (e.g. no MATCHUP CONTEXT), do not fabricate one — omit the point instead.',
+    '- Recommendation MUST match the "Signal from recent form" unless a listed factor clearly overrides it; if it disagrees, mention the disagreement in `risks`.',
+    '',
     'Respond ONLY in valid JSON. Your response must be a JSON object with keys: recommendation, confidence, summary, factors, risks, dataQuality.',
     'Example: {"recommendation": "over", "confidence": 90, "summary": "Player is in strong form.", "factors": ["Recent avg above line"], "risks": ["Tough opponent"], "dataQuality": "strong"}'
   ].filter(Boolean).join('\n');
