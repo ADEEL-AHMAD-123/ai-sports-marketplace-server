@@ -44,10 +44,31 @@ async function _invalidateInsightsForSport(sport) {
   const filter = { sport, status: INSIGHT_STATUS.GENERATED };
   const before = await Insight.countDocuments(filter);
   const res = await Insight.updateMany(filter, { $set: { status: INSIGHT_STATUS.STALE } });
+
+  // Also invalidate the PlayerStatsSnapshot cache. If a previous (broken)
+  // pipeline stored empty rawStats with stale:false, every subsequent
+  // getPlayerStats call short-circuits on that cached empty result and
+  // never re-fetches from the provider. Marking snapshots stale forces
+  // the next call to hit the current provider (e.g. ESPN for NFL).
+  const PlayerStatsSnapshotService = require('../services/PlayerStatsSnapshotService');
+  const snapshotsMarkedStale = await PlayerStatsSnapshotService.markSportSnapshotsStale(sport);
+
+  // Redis snapshot cache too — otherwise cacheGet returns the empty array
+  // ahead of the Mongo re-read.
+  const { cacheClear } = require('../config/redis');
+  const redisKeysDeleted = await cacheClear(`playerstats:snapshot:${sport}:*`);
+  // Also flush the NFL adapter's ESPN cache (bypasses the snapshot layer).
+  const espnKeysDeleted = sport === 'nfl'
+    ? await cacheClear('nfl:espn-stats:*')
+    : 0;
+
   logger.info(`[Admin] Invalidated ${res.modifiedCount || 0} ${sport.toUpperCase()} insights (marked stale)`, {
     matched: res.matchedCount || 0,
     modified: res.modifiedCount || 0,
     scannedGenerated: before,
+    snapshotsMarkedStale,
+    redisKeysDeleted,
+    espnKeysDeleted,
     elapsedMs: Date.now() - startedAt,
   });
   return {
@@ -55,6 +76,9 @@ async function _invalidateInsightsForSport(sport) {
     generatedBefore: before,
     matched: res.matchedCount || 0,
     modified: res.modifiedCount || 0,
+    snapshotsMarkedStale,
+    redisKeysDeleted,
+    espnKeysDeleted,
     note: 'Next unlock on each affected prop will regenerate via the current stats pipeline. No user charge — original credit already spent.',
   };
 }
