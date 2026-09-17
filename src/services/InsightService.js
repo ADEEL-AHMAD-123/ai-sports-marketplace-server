@@ -99,9 +99,21 @@ class InsightService {
     // Content fields (narrative, stats, confidence, etc.) get overwritten
     // by findByIdAndUpdate later in this function. Status is bumped back
     // to `generated` on save so cache-hits work normally afterward.
+    // Stale existing: always regenerate in place at the same _id (so users
+    // who previously unlocked keep valid references), but only skip the
+    // credit deduction when the CURRENT user is one of those previous
+    // unlockers. New users hitting a stale insight are charged normally.
     const staleRegenerationOfId = (existing && existing.status === 'stale') ? existing._id : null;
+    const skipCreditForStaleRegen =
+      !!staleRegenerationOfId
+      && user
+      && typeof user.hasUnlockedInsight === 'function'
+      && user.hasUnlockedInsight(existing._id);
 
-    if (existing && !staleRegenerationOfId) {
+    // Cache-HIT path: only for non-stale existing. A stale existing is
+    // always regenerated (in-place for previous unlockers so they aren't
+    // re-charged; fresh generate+charge for new users).
+    if (existing && existing.status !== 'stale') {
       logger.info('⚡ [InsightService] Cache HIT', logCtx);
 
       // Per-user charging model: each user pays their own credit to unlock,
@@ -599,10 +611,9 @@ class InsightService {
 
     let insight;
     if (staleRegenerationOfId) {
-      // Update in place — same _id keeps users' unlockedInsights valid so
-      // nobody is re-charged. Also promote status back to `generated` and
-      // refresh createdAt so cache TTL restarts. unlockCount is $inc'd (not
-      // reset) since the original unlock still counts as one.
+      // Update in place — same _id keeps previous unlockers' unlockedInsights
+      // references valid. Status back to `generated`, createdAt refreshed so
+      // cache TTL restarts. unlockCount is preserved.
       insight = await Insight.findByIdAndUpdate(
         staleRegenerationOfId,
         {
@@ -615,10 +626,22 @@ class InsightService {
         },
         { new: true }
       );
-      logger.info('✅ [InsightService] Insight regenerated in place (no charge)', {
+
+      if (skipCreditForStaleRegen) {
+        logger.info('✅ [InsightService] Insight regenerated in place (no charge — previous unlocker)', {
+          ...logCtx, insightId: insight._id,
+        });
+        return { insight: insight.toObject(), creditDeducted: false, cached: false, regenerated: true };
+      }
+
+      // First-time unlocker on a stale insight — charge normally.
+      logger.info('✅ [InsightService] Insight regenerated in place (charging new unlocker)', {
         ...logCtx, insightId: insight._id,
       });
-      // Skip credit deduction — the user's original unlock is still credited.
+      if (!isSystem && user) {
+        await this._deductCredit({ user, insight, logCtx });
+        return { insight: insight.toObject(), creditDeducted: true, cached: false, regenerated: true };
+      }
       return { insight: insight.toObject(), creditDeducted: false, cached: false, regenerated: true };
     }
 
