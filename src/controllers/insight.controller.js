@@ -129,7 +129,13 @@ const unlockInsight = async (req, res, next) => {
       bettingLine,
     });
 
-    if (existingInsight && user.hasUnlockedInsight(existingInsight._id)) {
+    // If the existing insight is STALE, do NOT short-circuit — fall through
+    // to InsightService.generateInsight, which handles stale in place
+    // (same _id, no credit deduction). Returning a stale insight as-is
+    // would show the user the old broken narrative forever.
+    const isStale = existingInsight?.status === 'stale';
+
+    if (existingInsight && !isStale && user.hasUnlockedInsight(existingInsight._id)) {
       const refreshedInsight = await InsightService.refreshExistingInsightContext(existingInsight);
 
       logger.info('♻️  [InsightController] Returning previously unlocked insight for free', {
@@ -145,8 +151,17 @@ const unlockInsight = async (req, res, next) => {
       });
     }
 
+    if (isStale && user.hasUnlockedInsight(existingInsight._id)) {
+      logger.info('♻️  [InsightController] Stale insight — falling through to regenerate in place', {
+        userId: user._id,
+        insightId: existingInsight._id,
+      });
+    }
+
     // ── Check credit balance ────────────────────────────────────────────────
-    if (!user.hasEnoughCredits(CREDITS.COST_PER_INSIGHT)) {
+    // Stale regeneration does NOT charge, so skip the balance check for it.
+    const isStaleRegen = isStale && user.hasUnlockedInsight(existingInsight._id);
+    if (!isStaleRegen && !user.hasEnoughCredits(CREDITS.COST_PER_INSIGHT)) {
       logger.warn('💸 [InsightController] Insufficient credits', {
         userId: user._id,
         credits: user.credits,
