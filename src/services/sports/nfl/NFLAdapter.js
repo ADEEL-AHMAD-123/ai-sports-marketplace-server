@@ -262,7 +262,11 @@ class NFLAdapter extends BaseAdapter {
     }
 
     const { cacheGet, cacheSet } = require('../../../config/redis');
-    const cacheKey = `nfl:espn-stats:${playerName.toLowerCase()}:${season}`;
+    // Cache key includes a "v2" version tag: bump whenever the returned
+    // stats shape changes (like the current+prior season merge added in
+    // this file's second revision). Old v1 entries expire naturally and
+    // don't get read.
+    const cacheKey = `nfl:espn-stats:v2:${playerName.toLowerCase()}:${season}`;
     const cached = await cacheGet(cacheKey);
     if (cached?.length > 0) return cached;
 
