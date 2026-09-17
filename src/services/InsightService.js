@@ -262,8 +262,21 @@ class InsightService {
           awayTeamName: prop?.awayTeamName || game?.awayTeam?.name || null,
           leagueId: game?.leagueId || null,
         }) || [];
+      } else if (sport === 'nfl') {
+        // NFL uses ESPN — resolved by name + team roster context.
+        // playerId is optional (legacy API-Sports fallback only).
+        if (!resolvedId) {
+          resolvedId = prop?.apiSportsPlayerId || null;
+        }
+        rawStats = await PlayerStatsSnapshotService.getPlayerStats({
+          sport,
+          playerName,
+          playerId: resolvedId,
+          homeTeamName: prop?.homeTeamName || game?.homeTeam?.name || null,
+          awayTeamName: prop?.awayTeamName || game?.awayTeam?.name || null,
+        }) || [];
       } else {
-        // NBA, NFL, and others: use apiSportsPlayerId lookup
+        // NBA and others: use apiSportsPlayerId lookup
         if (!resolvedId) {
           resolvedId = prop?.apiSportsPlayerId || null;
         }
