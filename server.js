@@ -72,7 +72,7 @@ const listenWithFallback = async (initialPort) => {
 
 const startServer = async () => {
   try {
-    logger.info('🚀 Starting AI Sports Insight Marketplace server...');
+    logger.info('🚀 Starting AI Sports Insight Marketplace server..');
     logger.info(`📦 Environment: ${process.env.NODE_ENV || 'development'}`);
 
     // ── Step 1: Connect to MongoDB ─────────────────────────────────────────
