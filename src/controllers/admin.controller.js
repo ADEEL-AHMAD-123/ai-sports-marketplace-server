@@ -445,18 +445,97 @@ const triggerCronJob = async (req, res, next) => {
       'score-nhl':          ['__direct', 'scoreNHL'],
       'score-nfl':          ['__direct', 'scoreNFL'],
       'score-soccer':       ['__direct', 'scoreSoccer'],
+      // Synthetic end-to-end tests — no DB props needed. Verifies each
+      // sport's rewritten stats pipeline works against real external
+      // services using hardcoded well-known players.
+      'test-espn-nfl':      ['__direct', 'testESPNNFL'],
       'ai-log-cleanup':     ['../jobs/orchestrators/postGameSync.job',    'runAILogCleanup'],
     };
 
     // Direct in-process handlers (no separate file). Used by the score-*
     // entries above. Keeps the routing table declarative but doesn't require
     // creating N one-line job files.
+    //
+    // `force` bypasses the "already scored" filter in StrategyService — every
+    // available prop for the sport gets re-scored regardless of lastScoredAt.
+    // Enable by adding ?force=true to the trigger URL. Useful after
+    // deploying new scoring logic (e.g. the ESPN NFL rewrite) to verify
+    // the new path without waiting for propWatcher to bump lastUpdatedAt.
+    const force = String(req.query.force ?? '').toLowerCase() === 'true';
     const DIRECT_HANDLERS = {
-      scoreNBA:    () => require('../services/StrategyService').scoreAllPropsForSport('nba'),
-      scoreMLB:    () => require('../services/StrategyService').scoreAllPropsForSport('mlb'),
-      scoreNHL:    () => require('../services/StrategyService').scoreAllPropsForSport('nhl'),
-      scoreNFL:    () => require('../services/StrategyService').scoreAllPropsForSport('nfl'),
-      scoreSoccer: () => require('../services/StrategyService').scoreAllPropsForSport('soccer'),
+      scoreNBA:    () => require('../services/StrategyService').scoreAllPropsForSport('nba',    { force }),
+      scoreMLB:    () => require('../services/StrategyService').scoreAllPropsForSport('mlb',    { force }),
+      scoreNHL:    () => require('../services/StrategyService').scoreAllPropsForSport('nhl',    { force }),
+      scoreNFL:    () => require('../services/StrategyService').scoreAllPropsForSport('nfl',    { force }),
+      scoreSoccer: () => require('../services/StrategyService').scoreAllPropsForSport('soccer', { force }),
+
+      // Synthetic ESPN-pipeline verifier for NFL. Runs the exact code
+      // path score-nfl would run for a real prop — player-name → ESPN
+      // roster lookup → athlete-ID → gamelog fetch → parse into per-game
+      // rows — for a hand-picked list of well-known active players.
+      // No database rows required.
+      testESPNNFL: async () => {
+        const NFLAdapter = require('../services/sports/nfl/NFLAdapter');
+        const nfl = require('../services/shared/adapterRegistry').getAdapter('nfl');
+        const { nflSeasonYear } = require('../services/sports/nfl/nflSeason');
+        const season = nflSeasonYear();
+
+        // Curated: three teams, four positions, common name shapes. If any
+        // of these fail we know something specific about the ESPN pipeline.
+        const targets = [
+          { playerName: 'Patrick Mahomes',    homeTeamName: 'Kansas City Chiefs', awayTeamName: 'Buffalo Bills' },
+          { playerName: 'Josh Allen',         homeTeamName: 'Buffalo Bills',      awayTeamName: 'Kansas City Chiefs' },
+          { playerName: 'Christian McCaffrey',homeTeamName: 'San Francisco 49ers',awayTeamName: 'Los Angeles Rams' },
+          { playerName: 'Travis Kelce',       homeTeamName: 'Kansas City Chiefs', awayTeamName: 'Buffalo Bills' },
+        ];
+
+        const results = [];
+        for (const t of targets) {
+          const startedAt = Date.now();
+          let ok = false;
+          let error = null;
+          let rowCount = 0;
+          let firstRow = null;
+          try {
+            const rows = await nfl._fetchStatsFromESPN({
+              playerName:   t.playerName,
+              homeTeamName: t.homeTeamName,
+              awayTeamName: t.awayTeamName,
+              season,
+            });
+            rowCount = rows.length;
+            firstRow = rows[0] || null;
+            ok = rowCount > 0;
+          } catch (err) {
+            error = err.message;
+          }
+          results.push({
+            player:  t.playerName,
+            teams:   `${t.awayTeamName} @ ${t.homeTeamName}`,
+            season,
+            ok,
+            rowCount,
+            error,
+            elapsedMs: Date.now() - startedAt,
+            firstRow: firstRow && {
+              date:              firstRow.date,
+              opponent:          firstRow.opponent,
+              passingYards:      firstRow.passingYards ?? null,
+              rushingYards:      firstRow.rushingYards ?? null,
+              receivingYards:    firstRow.receivingYards ?? null,
+              receptions:        firstRow.receptions ?? null,
+              passingTouchdowns: firstRow.passingTouchdowns ?? null,
+            },
+          });
+        }
+
+        const passing = results.filter(r => r.ok).length;
+        return {
+          summary: `${passing}/${results.length} players resolved successfully`,
+          season,
+          results,
+        };
+      },
     };
 
     const jobEntry = JOB_MAP[job];

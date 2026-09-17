@@ -74,22 +74,29 @@ class StrategyService {
 
   // ─── Score all props for a sport ──────────────────────────────────────────
 
-  async scoreAllPropsForSport(sport, { eventIds = null } = {}) {
-    logger.info(`📊 [StrategyService] Scoring all props for ${sport}...`);
+  async scoreAllPropsForSport(sport, { eventIds = null, force = false } = {}) {
+    logger.info(`📊 [StrategyService] Scoring all props for ${sport}${force ? ' (FORCE — bypassing lastScoredAt filter)' : ''}...`);
 
     const uniqueEventIds = Array.isArray(eventIds)
       ? [...new Set(eventIds.filter(Boolean).map(String))]
       : [];
 
-    const query = {
-      sport,
-      isAvailable: true,
-      $or: [
+    // The stale-check filter ($or on lastScoredAt) skips props that were
+    // already scored under the CURRENT lastUpdatedAt value. When we ship
+    // new scoring logic (like the ESPN NFL rewrite) that filter blocks
+    // re-scoring on the same props even though the scoring algorithm has
+    // changed. `force: true` bypasses the filter and re-scores every
+    // available prop for the sport regardless of when it was last scored.
+    // Wired to the admin cron via ?force=true — cheap escape hatch for
+    // "I just deployed new scoring code, verify it works" workflows.
+    const query = { sport, isAvailable: true };
+    if (!force) {
+      query.$or = [
         { lastScoredAt: { $exists: false } },
         { lastScoredAt: null },
         { $expr: { $gt: ['$lastUpdatedAt', '$lastScoredAt'] } },
-      ],
-    };
+      ];
+    }
 
     if (uniqueEventIds.length) {
       query.oddsEventId = { $in: uniqueEventIds };
