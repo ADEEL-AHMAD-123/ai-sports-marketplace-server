@@ -99,7 +99,10 @@ class PlayerStatsSnapshotService {
 
     const cacheKey = this._snapshotCacheKey(lookup);
     const cached = await cacheGet(cacheKey);
-    if (cached?.length >= 0) return cached;
+    // Only trust Redis cache if it has data. Empty arrays are treated as
+    // cache misses so a transient upstream failure doesn't poison the
+    // cache for hours (SNAPSHOT_CACHE_TTL_SECONDS = 6h).
+    if (Array.isArray(cached) && cached.length > 0) return cached;
 
     const mongoReady = this._isMongoReady();
 
@@ -112,7 +115,12 @@ class PlayerStatsSnapshotService {
       }).lean()
       : null;
 
-    if (existing && !existing.stale && Array.isArray(existing.rawStats)) {
+    // Trust the Mongo snapshot only if it's non-stale AND non-empty.
+    // Empty rawStats stored from an earlier broken pipeline (e.g. before
+    // the ESPN switch resolved team names) would otherwise short-circuit
+    // every subsequent call forever. Empty triggers a fresh provider
+    // fetch on this call.
+    if (existing && !existing.stale && Array.isArray(existing.rawStats) && existing.rawStats.length > 0) {
       await cacheSet(cacheKey, existing.rawStats, SNAPSHOT_CACHE_TTL_SECONDS);
       return existing.rawStats;
     }

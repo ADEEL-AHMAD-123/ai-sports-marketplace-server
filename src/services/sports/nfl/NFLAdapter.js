@@ -300,12 +300,12 @@ class NFLAdapter extends BaseAdapter {
         }
       };
 
-      const currentRows = await fetchOne(season);
+      const currentRows = (await fetchOne(season)).map(r => ({ ...r, season }));
       let rows = currentRows;
       let usedSeasons = [season];
 
       if (currentRows.length < MIN_GAMES_BEFORE_MERGE) {
-        const priorRows = await fetchOne(season - 1);
+        const priorRows = (await fetchOne(season - 1)).map(r => ({ ...r, season: season - 1 }));
         if (priorRows.length > 0) {
           // ESPN returns games newest-first within a season. Merge with
           // prior season BEFORE current so the combined array is roughly
