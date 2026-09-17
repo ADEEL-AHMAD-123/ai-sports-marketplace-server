@@ -279,34 +279,48 @@ class NFLAdapter extends BaseAdapter {
         return [];
       }
 
-      // Try current season first, fall back to prior season if empty
-      // (early-week-1 games have zero regular-season stats).
-      const seasonsToTry = [season, season - 1];
-      let rows = [];
-      let usedSeason = null;
-      for (const trySeason of seasonsToTry) {
+      // Fetch current season. Early in the season this returns 1-2 games
+      // which is too few for the FORM/EDGE/BASELINE windows (5/8/17) that
+      // NFLFormulas uses. Merge prior season chronologically when current
+      // is thin so recent-form still works during week 1-2.
+      const MIN_GAMES_BEFORE_MERGE = 10;
+      const fetchOne = async (yr) => {
         try {
-          const raw = await ESPNClient.gamelog('nfl', athleteId, trySeason);
-          const parsed = this._parseESPNGamelog(raw);
-          if (parsed.length > 0) { rows = parsed; usedSeason = trySeason; break; }
+          const raw = await ESPNClient.gamelog('nfl', athleteId, yr);
+          return this._parseESPNGamelog(raw);
         } catch (fetchErr) {
-          logger.debug(`[NFL/ESPN] gamelog season ${trySeason} failed`, {
+          logger.debug(`[NFL/ESPN] gamelog season ${yr} failed`, {
             athleteId, playerName, error: fetchErr.message,
           });
+          return [];
+        }
+      };
+
+      const currentRows = await fetchOne(season);
+      let rows = currentRows;
+      let usedSeasons = [season];
+
+      if (currentRows.length < MIN_GAMES_BEFORE_MERGE) {
+        const priorRows = await fetchOne(season - 1);
+        if (priorRows.length > 0) {
+          // ESPN returns games newest-first within a season. Merge with
+          // prior season BEFORE current so the combined array is roughly
+          // oldest→newest and the FORM_WINDOW slice at the end pulls the
+          // most recent games (mix of prior season + current).
+          rows = [...priorRows, ...currentRows];
+          usedSeasons = [season - 1, season];
         }
       }
 
       if (rows.length > 0) {
-        // ESPN game logs are stable once a game is finalized — cache for
-        // 6h during active play, longer would be fine for finalized games.
         await cacheSet(cacheKey, rows, 6 * 60 * 60);
-        if (usedSeason && usedSeason < season) {
-          logger.warn(`⚠️  [NFL/ESPN] Using ${usedSeason} log for ${playerName} — ${season} empty`);
-        } else {
-          logger.info(`✅ [NFL/ESPN] ${rows.length} game records for ${playerName} (season ${usedSeason})`);
-        }
+        logger.info(
+          `✅ [NFL/ESPN] ${rows.length} game records for ${playerName} ` +
+          `(season${usedSeasons.length > 1 ? 's' : ''} ${usedSeasons.join('+')}` +
+          `, current=${currentRows.length})`
+        );
       } else {
-        logger.warn(`⚠️  [NFL/ESPN] No stats for ${playerName} across ${seasonsToTry.join(', ')}`);
+        logger.warn(`⚠️  [NFL/ESPN] No stats for ${playerName} across ${season} and ${season - 1}`);
       }
       return rows;
     } catch (err) {
