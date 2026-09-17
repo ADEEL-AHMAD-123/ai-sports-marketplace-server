@@ -58,8 +58,16 @@ class PlayerStatsSnapshotService {
 
     let playerKey;
     if (sport === 'nba' || sport === 'nfl') {
-      // ID-based sports: stable key regardless of opponent
-      playerKey = playerId ? `id:${playerId}` : null;
+      // Prefer stable id-based key when playerId is available (API-Sports
+      // path). Fall back to name-based key when it isn't — that's the
+      // case now for NFL after the switch to ESPN, which uses name +
+      // roster context instead of an external ID.
+      if (playerId) {
+        playerKey = `id:${playerId}`;
+      } else {
+        const normName = normalizePlayerNameKey(playerName);
+        playerKey = normName ? `name:${normName}` : null;
+      }
     } else if (sport === 'soccer') {
       // Name-based, scoped per league so EPL and La Liga don't share a cache slot
       const normName = normalizePlayerNameKey(playerName);
@@ -183,7 +191,21 @@ class PlayerStatsSnapshotService {
         });
       }
 
-      // NBA and NFL — require playerId
+      if (lookup.sport === 'nfl') {
+        // NFL now uses ESPN, which resolves the athlete via name + team
+        // roster lookup. Pass everything the adapter might need — the
+        // legacy playerId is still forwarded so the API-Sports fallback
+        // path (USE_ESPN_STATS_NFL=false) keeps working.
+        return await adapter.fetchPlayerStats({
+          playerId:     lookup.playerId,
+          playerName:   params.playerName,
+          homeTeamName: params.homeTeamName || null,
+          awayTeamName: params.awayTeamName || null,
+          season:       lookup.season,
+        });
+      }
+
+      // NBA — still requires playerId (Phase 2 will move it to name-based ESPN)
       if (!lookup.playerId) return [];
       return await adapter.fetchPlayerStats({
         playerId: lookup.playerId,
