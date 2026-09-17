@@ -559,7 +559,18 @@ const triggerCronJob = async (req, res, next) => {
       throw new AppError(`Job module loaded but "${fnName}" is not a function`, 500);
     }
 
-    result = await fn();
+    // Force flag routing — surgical, not blanket. The direct scoring
+    // handlers already read `force` from the closure above. Individual
+    // sport propWatchers (currently just NFL) accept `{ force }` as
+    // their `run` arg. Orchestrator jobs (prop-watcher, post-game-sync)
+    // and morning-scraper don't accept it — pass no args to them so
+    // their positional-arg signatures (e.g. runPropWatcher(sport)) aren't
+    // corrupted by an accidental object.
+    const jobsAcceptingForce = new Set([
+      'prop-watcher-nfl', // per-sport propWatcher run({ force })
+      // Add more here as we roll out force to NBA/MLB/NHL/soccer watchers.
+    ]);
+    result = jobsAcceptingForce.has(job) ? await fn({ force }) : await fn();
 
     res.status(HTTP_STATUS.OK).json({ success: true, job, result });
   } catch (err) {

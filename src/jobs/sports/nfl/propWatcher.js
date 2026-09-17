@@ -18,8 +18,8 @@ const logger = require('../../../config/logger');
 const SPORT = 'nfl';
 const normName = (n = '') => String(n).toLowerCase().replace(/[.'\-]/g, ' ').replace(/\s+/g, ' ').trim();
 
-async function run() {
-  logger.info(`👁️  [${SPORT.toUpperCase()}PropWatcher] Starting...`);
+async function run({ force = false } = {}) {
+  logger.info(`👁️  [${SPORT.toUpperCase()}PropWatcher] Starting${force ? ' (FORCE — bypassing polling interval)' : ''}...`);
   const adapter = getAdapter(SPORT);
 
   const now = new Date();
@@ -46,7 +46,10 @@ async function run() {
 
   for (const game of games) {
     const engaged = engagedEventIds.has(String(game.oddsEventId));
-    if (!shouldFetchPropsForGame(game, now, { engaged })) { skippedByPolicy += 1; continue; }
+    // force=true bypasses the polling-interval check so an admin can
+    // demand a fresh fetch — spends Odds API credits regardless of
+    // whether the game was recently fetched. Use for debug / demo.
+    if (!force && !shouldFetchPropsForGame(game, now, { engaged })) { skippedByPolicy += 1; continue; }
 
     attempted += 1;
     const rawProps = await adapter.fetchProps(game.oddsEventId);
