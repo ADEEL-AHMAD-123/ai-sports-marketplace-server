@@ -645,8 +645,39 @@ class InsightService {
       return { insight: insight.toObject(), creditDeducted: false, cached: false, regenerated: true };
     }
 
-    insight = await Insight.create(insightData);
-    logger.info('✅ [InsightService] Insight saved', { ...logCtx, insightId: insight._id });
+    // Race guard: two users can hit generateInsight for the same prop in
+    // parallel. Both call Insight.create → the second throws E11000 on
+    // the unique compound index. Catch that specific error, re-read the
+    // now-existing insight, and treat it as a cache-HIT (deducts credit
+    // via the same path as any other user reading a cached insight).
+    try {
+      insight = await Insight.create(insightData);
+      logger.info('✅ [InsightService] Insight saved', { ...logCtx, insightId: insight._id });
+    } catch (err) {
+      if (err && err.code === 11000) {
+        logger.info('🏁 [InsightService] Race — another request created the insight first, adopting it', logCtx);
+        const winner = await Insight.findOne({
+          sport, eventId, playerName, statType, bettingLine,
+        }).lean();
+        if (winner) {
+          if (!isSystem && user && !user.hasUnlockedInsight(winner._id)) {
+            if (!user.hasEnoughCredits(CREDITS.COST_PER_INSIGHT)) {
+              return {
+                insight: null,
+                creditDeducted: false,
+                insufficientCredits: true,
+                error: `Insufficient credits — you need ${CREDITS.COST_PER_INSIGHT} to unlock this insight.`,
+              };
+            }
+            await this._deductCredit({ user, insight: winner, logCtx });
+            await Insight.findByIdAndUpdate(winner._id, { $inc: { unlockCount: 1 } });
+            return { insight: winner, creditDeducted: true, cached: true };
+          }
+          return { insight: winner, creditDeducted: false, cached: true };
+        }
+      }
+      throw err;
+    }
 
     // ── STEP 10: Deduct credit ─────────────────────────────────────────────
     // System (coverage) generations have no user and never deduct.

@@ -266,7 +266,10 @@ class NFLAdapter extends BaseAdapter {
     // stats shape changes (like the current+prior season merge added in
     // this file's second revision). Old v1 entries expire naturally and
     // don't get read.
-    const cacheKey = `nfl:espn-stats:v2:${playerName.toLowerCase()}:${season}`;
+    // v3: rows are now chronologically sorted before caching. v2 cached
+    // arrays were in ESPN's newest-first order, which broke slice(-N)
+    // windowing (see sort below). Bumping the key forces a fresh fetch.
+    const cacheKey = `nfl:espn-stats:v3:${playerName.toLowerCase()}:${season}`;
     const cached = await cacheGet(cacheKey);
     if (cached?.length > 0) return cached;
 
@@ -307,14 +310,22 @@ class NFLAdapter extends BaseAdapter {
       if (currentRows.length < MIN_GAMES_BEFORE_MERGE) {
         const priorRows = (await fetchOne(season - 1)).map(r => ({ ...r, season: season - 1 }));
         if (priorRows.length > 0) {
-          // ESPN returns games newest-first within a season. Merge with
-          // prior season BEFORE current so the combined array is roughly
-          // oldest→newest and the FORM_WINDOW slice at the end pulls the
-          // most recent games (mix of prior season + current).
           rows = [...priorRows, ...currentRows];
           usedSeasons = [season - 1, season];
         }
       }
+
+      // ESPN returns games newest-first within each season, so a raw
+      // concat of prior + current is NOT chronological (the last N would
+      // be a mix of oldest prior and earliest current). Sort ascending
+      // by date so slice(-N) in NFLFormulas gets the true most-recent N.
+      // Rows without a parseable date fall to the start (oldest) so they
+      // don't accidentally dominate the recent window.
+      rows = rows.slice().sort((a, b) => {
+        const ta = a.date ? new Date(a.date).getTime() : 0;
+        const tb = b.date ? new Date(b.date).getTime() : 0;
+        return ta - tb;  // oldest → newest
+      });
 
       if (rows.length > 0) {
         await cacheSet(cacheKey, rows, 6 * 60 * 60);
