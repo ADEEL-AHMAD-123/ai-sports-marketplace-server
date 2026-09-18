@@ -2,9 +2,31 @@ const BaseAdapter = require('../../shared/BaseAdapter');
 const axios = require('axios');
 const logger = require('../../../config/logger');
 const ApiSportsClient = require('../../shared/ApiSportsClient');
+const ESPNClient = require('../../shared/ESPNClient');
+const ESPNPlayerResolver = require('../../shared/ESPNPlayerResolver');
 const { cacheGet, cacheSet } = require('../../../config/redis');
 const { applySoccerFormulas, buildSoccerPrompt } = require('./SoccerFormulas');
 const { getTeamId, getTeamAbbr, getTeamLogoUrl, getApiSportsLogoUrl } = require('../../shared/teamMaps');
+
+// Feature flag — flip to 'false' to fall back to the legacy API-Sports
+// season-aggregate path (which fabricates per-game rows from season
+// averages). ESPN gives real per-match data.
+const USE_ESPN_STATS = String(process.env.USE_ESPN_STATS_SOCCER || 'true').toLowerCase() === 'true';
+
+// API-Sports league ID → ESPN league sportKey. Extends alongside
+// SoccerAdapter's SOCCER_LEAGUES map. Any league without an ESPN
+// mapping falls back to the legacy path (which still works from
+// season aggregates).
+const API_SPORTS_LEAGUE_TO_ESPN = {
+  39:  'soccer_epl',
+  140: 'soccer_laliga',
+  78:  'soccer_bundesliga',
+  135: 'soccer_serie_a',
+  61:  'soccer_ligue_1',
+  253: 'soccer_mls',
+};
+
+const MIN_MATCHES_BEFORE_MERGE_SOCCER = 8;
 
 // Per-league config.
 //   • `region`       — the human country label (used in logs / UI).
@@ -238,6 +260,17 @@ class SoccerAdapter extends BaseAdapter {
     if (!playerName) return [];
 
     const seasonYear = season || this._defaultSeasonYear();
+
+    if (USE_ESPN_STATS) {
+      const espnResult = await this._fetchStatsFromESPN({
+        playerName, homeTeamName, awayTeamName, season: seasonYear, leagueId,
+      });
+      if (espnResult.length > 0) return espnResult;
+      // ESPN miss (unmapped league, unresolved player, empty gamelog) →
+      // fall through to legacy path so the pipeline doesn't fail entirely.
+      logger.debug(`[SOCCER] ESPN empty for "${playerName}" — falling back to API-Sports`);
+    }
+
     const cacheKey = `soccer:stats:${seasonYear}:${this._normName(playerName)}:${this._normName(homeTeamName)}:${this._normName(awayTeamName)}:${leagueId || 'global'}`;
     const cached = await cacheGet(cacheKey);
     if (cached?.length > 0) return cached;
@@ -278,6 +311,161 @@ class SoccerAdapter extends BaseAdapter {
 
     await cacheSet(cacheKey, rows, STATS_CACHE_TTL);
     return rows;
+  }
+
+  /**
+   * ESPN-backed soccer stats path. Resolves the player to an ESPN
+   * athlete ID via the league-specific team roster, pulls their per-match
+   * gamelog, and returns rows shaped for SoccerFormulas.
+   *
+   * League routing: leagueId is API-Sports's numeric id (e.g. 39=EPL).
+   * We map to ESPN's league sportKey (soccer_epl) before calling the
+   * shared ESPN client + resolver.
+   */
+  async _fetchStatsFromESPN({ playerName, homeTeamName, awayTeamName, season, leagueId }) {
+    const espnSportKey = API_SPORTS_LEAGUE_TO_ESPN[Number(leagueId)];
+    if (!espnSportKey) {
+      logger.debug(`[SOCCER/ESPN] No ESPN mapping for league ${leagueId} — skipping ESPN`);
+      return [];
+    }
+
+    const cacheKey = `soccer:espn-stats:v1:${espnSportKey}:${playerName.toLowerCase()}:${season}`;
+    const cached = await cacheGet(cacheKey);
+    if (cached?.length > 0) return cached;
+
+    try {
+      const athleteId = await ESPNPlayerResolver.resolve({
+        sportKey: espnSportKey,
+        playerName,
+        homeTeamName,
+        awayTeamName,
+      });
+      if (!athleteId) {
+        logger.debug(`[SOCCER/ESPN] Could not resolve athlete for "${playerName}" in ${espnSportKey}`);
+        return [];
+      }
+
+      const fetchOne = async (yr) => {
+        try {
+          const raw = await ESPNClient.gamelog(espnSportKey, athleteId, yr);
+          return this._parseESPNGamelog(raw);
+        } catch (err) {
+          logger.debug(`[SOCCER/ESPN] gamelog season ${yr} failed`, {
+            athleteId, playerName, error: err.message,
+          });
+          return [];
+        }
+      };
+
+      const currentRows = (await fetchOne(season)).map((r) => ({ ...r, season }));
+      let rows = currentRows;
+      let usedSeasons = [season];
+
+      if (currentRows.length < MIN_MATCHES_BEFORE_MERGE_SOCCER) {
+        const priorRows = (await fetchOne(season - 1)).map((r) => ({ ...r, season: season - 1 }));
+        if (priorRows.length > 0) {
+          rows = [...priorRows, ...currentRows];
+          usedSeasons = [season - 1, season];
+        }
+      }
+
+      // Chronological sort (oldest → newest) so slice(-N) picks the newest N.
+      rows = rows.slice().sort((a, b) => {
+        const ta = a.date ? new Date(a.date).getTime() : 0;
+        const tb = b.date ? new Date(b.date).getTime() : 0;
+        return ta - tb;
+      });
+
+      if (rows.length > 0) {
+        await cacheSet(cacheKey, rows, STATS_CACHE_TTL);
+        logger.info(
+          `✅ [SOCCER/ESPN] ${rows.length} matches for ${playerName} (${espnSportKey}, ` +
+          `season${usedSeasons.length > 1 ? 's' : ''} ${usedSeasons.join('+')}, current=${currentRows.length})`
+        );
+      } else {
+        logger.debug(`[SOCCER/ESPN] No matches for ${playerName} in ${espnSportKey}`);
+      }
+      return rows;
+    } catch (err) {
+      logger.error(`❌ [SOCCER/ESPN] fetchPlayerStats failed for "${playerName}"`, { error: err.message });
+      return [];
+    }
+  }
+
+  /**
+   * ESPN soccer gamelog parser. Same category+events shape as NFL/NBA,
+   * but stat labels are soccer-specific: G, A, SH, ST, MIN, YC, RC.
+   */
+  _parseESPNGamelog(raw) {
+    if (!raw) return [];
+    const labels = Array.isArray(raw.labels) ? raw.labels : [];
+    const eventsMap = raw.events && typeof raw.events === 'object' && !Array.isArray(raw.events)
+      ? raw.events
+      : {};
+
+    const rows = [];
+    const seenIds = new Set();
+
+    const seasonTypes = Array.isArray(raw.seasonTypes) ? raw.seasonTypes : [];
+    for (const st of seasonTypes) {
+      const categories = Array.isArray(st?.categories) ? st.categories : [];
+      for (const cat of categories) {
+        if (cat?.type && cat.type !== 'event') continue;
+        const events = Array.isArray(cat?.events) ? cat.events : [];
+        for (const event of events) {
+          const meta = eventsMap[event.eventId] || {};
+          const row = this._eventToRowSoccer({ ...meta, ...event }, labels);
+          if (row) {
+            seenIds.add(row.eventId);
+            rows.push(row);
+          }
+        }
+      }
+    }
+
+    for (const event of Object.values(eventsMap)) {
+      const id = event?.eventId || event?.id;
+      if (id && seenIds.has(id)) continue;
+      if (!Array.isArray(event?.stats) || event.stats.length === 0) continue;
+      const row = this._eventToRowSoccer(event, labels);
+      if (row) rows.push(row);
+    }
+    return rows;
+  }
+
+  _eventToRowSoccer(event, labels) {
+    if (!event) return null;
+    const statValues = Array.isArray(event.stats) ? event.stats : [];
+    if (statValues.length === 0) return null;
+
+    const raw = {};
+    for (let i = 0; i < labels.length && i < statValues.length; i += 1) {
+      raw[labels[i]] = statValues[i];
+    }
+
+    const num = (v) => {
+      const x = Number(String(v ?? '').replace(/,/g, ''));
+      return Number.isFinite(x) ? x : 0;
+    };
+
+    // ESPN soccer labels seen in the wild: MIN, G, A, SH, ST, FC, FA,
+    // YC, RC, CS, GA, SV. Fields mapped to what SoccerFormulas reads.
+    return {
+      eventId:  event.eventId || event.id || null,
+      date:     event.gameDate || event.gameDateTime || event.date || null,
+      opponent: event.opponent?.abbreviation || event.opponent?.displayName || null,
+      homeAway: event.homeAwaySymbol
+                || (event.atVs === '@' || event.atVs === 'at' ? 'away' : 'home'),
+
+      // Formula-facing fields
+      goals:            num(raw.G),
+      assists:          num(raw.A),
+      shots_on_target:  num(raw.ST),
+      shots:            num(raw.SH),
+      minutes:          num(raw.MIN),
+      yellowCards:      num(raw.YC),
+      redCards:         num(raw.RC),
+    };
   }
 
   getRequiredStats() {

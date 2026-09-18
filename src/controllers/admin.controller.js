@@ -58,7 +58,7 @@ async function _invalidateInsightsForSport(sport) {
   const { cacheClear } = require('../config/redis');
   const redisKeysDeleted = await cacheClear(`playerstats:snapshot:${sport}:*`);
   // Also flush the sport-specific ESPN adapter cache (bypasses the snapshot layer).
-  const espnKeysDeleted = (sport === 'nfl' || sport === 'nba')
+  const espnKeysDeleted = (sport === 'nfl' || sport === 'nba' || sport === 'soccer')
     ? await cacheClear(`${sport}:espn-stats:*`)
     : 0;
 
