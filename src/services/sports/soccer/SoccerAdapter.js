@@ -448,8 +448,12 @@ class SoccerAdapter extends BaseAdapter {
       return Number.isFinite(x) ? x : 0;
     };
 
-    // ESPN soccer labels seen in the wild: MIN, G, A, SH, ST, FC, FA,
-    // YC, RC, CS, GA, SV. Fields mapped to what SoccerFormulas reads.
+    // ESPN soccer labels (verified against gamelog response):
+    //   G = totalGoals, A = goalAssists, SHOT = totalShots,
+    //   SOG = shotsOnTarget, FC = foulsCommitted, FA = foulsSuffered,
+    //   OF = offsides, YC = yellowCards, RC = redCards.
+    // ESPN's soccer gamelog does NOT include minutes per match — treat
+    // as 0/unknown; SoccerFormulas handles that gracefully.
     return {
       eventId:  event.eventId || event.id || null,
       date:     event.gameDate || event.gameDateTime || event.date || null,
@@ -460,11 +464,15 @@ class SoccerAdapter extends BaseAdapter {
       // Formula-facing fields
       goals:            num(raw.G),
       assists:          num(raw.A),
-      shots_on_target:  num(raw.ST),
-      shots:            num(raw.SH),
-      minutes:          num(raw.MIN),
+      shots:            num(raw.SHOT),
+      shots_on_target:  num(raw.SOG),
+      foulsCommitted:   num(raw.FC),
+      foulsSuffered:    num(raw.FA),
+      offsides:         num(raw.OF),
       yellowCards:      num(raw.YC),
       redCards:         num(raw.RC),
+      // Minutes not exposed by ESPN gamelog — leave 0.
+      minutes:          0,
     };
   }
 
