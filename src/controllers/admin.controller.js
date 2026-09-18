@@ -570,8 +570,11 @@ const triggerCronJob = async (req, res, next) => {
     // their positional-arg signatures (e.g. runPropWatcher(sport)) aren't
     // corrupted by an accidental object.
     const jobsAcceptingForce = new Set([
-      'prop-watcher-nfl', // per-sport propWatcher run({ force })
-      // Add more here as we roll out force to NBA/MLB/NHL/soccer watchers.
+      'prop-watcher-nfl',    // per-sport propWatcher run({ force })
+      'prop-watcher-soccer',
+      'prop-watcher-nba',
+      'prop-watcher-mlb',
+      'prop-watcher-nhl',
     ]);
     result = jobsAcceptingForce.has(job) ? await fn({ force }) : await fn();
 

@@ -24,8 +24,8 @@ const normName = (n = '') => String(n)
   .replace(/\s+/g, ' ')
   .trim();
 
-async function run() {
-  logger.info(`👁️  [${SPORT.toUpperCase()}PropWatcher] Starting...`);
+async function run({ force = false } = {}) {
+  logger.info(`👁️  [${SPORT.toUpperCase()}PropWatcher] Starting${force ? ' (FORCE — bypassing polling interval)' : ''}...`);
   const adapter = getAdapter(SPORT);
 
   const now = new Date();
@@ -86,7 +86,7 @@ async function run() {
   const results = await _mapGamesWithConcurrency(games, async (game) => {
     try {
       const engaged = engagedEventIds.has(String(game.oddsEventId));
-      if (!shouldFetchPropsForGame(game, now, { engaged })) {
+      if (!force && !shouldFetchPropsForGame(game, now, { engaged })) {
         return { upserted: 0, touchedEventId: null, outcome: 'skippedByPolicy' };
       }
 
