@@ -188,6 +188,37 @@ const SOCCER_TEAMS = {
   'VfL Wolfsburg':           { id: 161, abbr: 'wob' },
   'Bayern Munich':           { id: 157, abbr: 'bay' },
   'Bayern München':          { id: 157, abbr: 'bay' },
+
+  // ─── Bundesliga (Germany) ────────────────────────────────────────────
+  // API-Sports free plan doesn't cover football (leagueId 78 returns 0
+  // teams). Dropping the id so the resolver falls back to the ESPN CDN
+  // via abbr. ESPN's football/soccer team-logo abbrs are usually 3-4
+  // letter codes; verified against a.espncdn.com/i/teamlogos/soccer/500/.
+  'Borussia Dortmund':          { abbr: 'dor' },
+  'RB Leipzig':                 { abbr: 'lei' },
+  'Bayer Leverkusen':           { abbr: 'b04' },
+  'Bayer 04 Leverkusen':        { abbr: 'b04' },
+  'Union Berlin':               { abbr: 'fcu' },
+  'Eintracht Frankfurt':        { abbr: 'sge' },
+  'SC Freiburg':                { abbr: 'scf' },
+  'Werder Bremen':              { abbr: 'svw' },
+  '1. FC Köln':                 { abbr: 'koe' },
+  'FC Köln':                    { abbr: 'koe' },
+  'FSV Mainz 05':               { abbr: 'm05' },
+  'Mainz 05':                   { abbr: 'm05' },
+  'Borussia Monchengladbach':   { abbr: 'bmg' },
+  'Borussia Mönchengladbach':   { abbr: 'bmg' },
+  'FC Augsburg':                { abbr: 'fca' },
+  'Augsburg':                   { abbr: 'fca' },
+  'VfB Stuttgart':              { abbr: 'vfb' },
+  'TSG Hoffenheim':             { abbr: 'hof' },
+  'Hoffenheim':                 { abbr: 'hof' },
+  'Hamburger SV':               { abbr: 'hsv' },
+  '1. FC Heidenheim':           { abbr: 'hei' },
+  'Heidenheim':                 { abbr: 'hei' },
+  'St. Pauli':                  { abbr: 'stp' },
+  'FC St. Pauli':               { abbr: 'stp' },
+  'Holstein Kiel':              { abbr: 'ksv' },
   'Toronto FC':              { id: 1601, abbr: 'tor' },
   'Inter Miami':             { id: 9568, abbr: 'mia' },
   'Inter Miami CF':          { id: 9568, abbr: 'mia' },
