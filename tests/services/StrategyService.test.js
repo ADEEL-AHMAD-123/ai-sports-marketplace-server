@@ -85,8 +85,22 @@ describe('StrategyService', () => {
     // New behaviour: PlayerStatsSnapshotService is called once per unique fetch key.
     // LeBron has 2 props but same playerId, so grouped into one fetch + Curry = 2 total.
     expect(PlayerStatsSnapshotService.getPlayerStats).toHaveBeenCalledTimes(2);
-    expect(PlayerStatsSnapshotService.getPlayerStats).toHaveBeenCalledWith({ sport: 'nba', playerId: 2544 });
-    expect(PlayerStatsSnapshotService.getPlayerStats).toHaveBeenCalledWith({ sport: 'nba', playerId: 115 });
+    // NBA now uses ESPN — spec passes name + team context for the resolver;
+    // playerId is kept for the legacy API-Sports fallback path.
+    expect(PlayerStatsSnapshotService.getPlayerStats).toHaveBeenCalledWith({
+      sport: 'nba',
+      playerId: 2544,
+      playerName: 'LeBron James',
+      homeTeamName: undefined,
+      awayTeamName: undefined,
+    });
+    expect(PlayerStatsSnapshotService.getPlayerStats).toHaveBeenCalledWith({
+      sport: 'nba',
+      playerId: 115,
+      playerName: 'Stephen Curry',
+      homeTeamName: undefined,
+      awayTeamName: undefined,
+    });
     expect(result).toEqual(expect.objectContaining({ failed: 0 }));
   });
 

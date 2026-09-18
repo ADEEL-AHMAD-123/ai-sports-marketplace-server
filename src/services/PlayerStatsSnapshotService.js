@@ -213,11 +213,15 @@ class PlayerStatsSnapshotService {
         });
       }
 
-      // NBA — still requires playerId (Phase 2 will move it to name-based ESPN)
-      if (!lookup.playerId) return [];
+      // NBA — now uses ESPN by default (Phase 2). Pass name + team names
+      // for the ESPN resolver; playerId still forwarded so the legacy
+      // API-Sports fallback path (USE_ESPN_STATS_NBA=false) keeps working.
       return await adapter.fetchPlayerStats({
-        playerId: lookup.playerId,
-        season: lookup.season,
+        playerId:     lookup.playerId,
+        playerName:   params.playerName,
+        homeTeamName: params.homeTeamName || null,
+        awayTeamName: params.awayTeamName || null,
+        season:       lookup.season,
       });
     } catch (err) {
       logger.warn('[PlayerStatsSnapshotService] Provider fetch failed', {

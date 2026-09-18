@@ -274,8 +274,8 @@ class InsightService {
           awayTeamName: prop?.awayTeamName || game?.awayTeam?.name || null,
           leagueId: game?.leagueId || null,
         }) || [];
-      } else if (sport === 'nfl') {
-        // NFL uses ESPN — resolved by name + team roster context.
+      } else if (sport === 'nfl' || sport === 'nba') {
+        // NFL and NBA use ESPN — resolved by name + team roster context.
         // playerId is optional (legacy API-Sports fallback only).
         if (!resolvedId) {
           resolvedId = prop?.apiSportsPlayerId || null;
@@ -288,7 +288,7 @@ class InsightService {
           awayTeamName: prop?.awayTeamName || game?.awayTeam?.name || null,
         }) || [];
       } else {
-        // NBA and others: use apiSportsPlayerId lookup
+        // Fallback (unused now, but kept for safety): playerId lookup
         if (!resolvedId) {
           resolvedId = prop?.apiSportsPlayerId || null;
         }

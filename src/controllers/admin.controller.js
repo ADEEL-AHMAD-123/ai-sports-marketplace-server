@@ -57,9 +57,9 @@ async function _invalidateInsightsForSport(sport) {
   // ahead of the Mongo re-read.
   const { cacheClear } = require('../config/redis');
   const redisKeysDeleted = await cacheClear(`playerstats:snapshot:${sport}:*`);
-  // Also flush the NFL adapter's ESPN cache (bypasses the snapshot layer).
-  const espnKeysDeleted = sport === 'nfl'
-    ? await cacheClear('nfl:espn-stats:*')
+  // Also flush the sport-specific ESPN adapter cache (bypasses the snapshot layer).
+  const espnKeysDeleted = (sport === 'nfl' || sport === 'nba')
+    ? await cacheClear(`${sport}:espn-stats:*`)
     : 0;
 
   logger.info(`[Admin] Invalidated ${res.modifiedCount || 0} ${sport.toUpperCase()} insights (marked stale)`, {

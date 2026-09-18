@@ -95,7 +95,16 @@ describe('PlayerStatsSnapshotService', () => {
     });
 
     expect(result).toEqual(staleStats);
-    expect(mockAdapter.fetchPlayerStats).toHaveBeenCalledWith({ playerId: 203999, season: 2025 });
+    // NBA now uses ESPN — the snapshot service forwards playerName + team
+    // context alongside the legacy playerId (for rollback via
+    // USE_ESPN_STATS_NBA=false).
+    expect(mockAdapter.fetchPlayerStats).toHaveBeenCalledWith({
+      playerId: 203999,
+      playerName: undefined,
+      homeTeamName: null,
+      awayTeamName: null,
+      season: 2025,
+    });
     expect(PlayerStatsSnapshot.findOneAndUpdate).not.toHaveBeenCalled();
     expect(cacheSet).toHaveBeenCalledWith(
       'playerstats:snapshot:nba:2025:standard:id:203999',
