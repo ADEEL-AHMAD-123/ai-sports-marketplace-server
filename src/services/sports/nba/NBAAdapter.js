@@ -250,10 +250,19 @@ class NBAAdapter extends BaseAdapter {
    */
   _parseESPNGamelog(raw) {
     if (!raw) return [];
-    const names = Array.isArray(raw.names) ? raw.names : [];
+    // ESPN NBA response: `labels[]` gives short codes (MIN, FG, 3PT, FT,
+    // REB, AST, BLK, STL, PF, TO, PTS). Categorized events only carry
+    // { eventId, stats[] }; date/opponent/homeAway live in the flat
+    // top-level `events` map keyed by eventId. Zip by labels index.
+    const labels = Array.isArray(raw.labels) ? raw.labels : [];
+    const eventsMap = raw.events && typeof raw.events === 'object' && !Array.isArray(raw.events)
+      ? raw.events
+      : {};
 
     const rows = [];
-    // Path 1: seasonTypes → categories → events with inline stats
+    const seenIds = new Set();
+
+    // Path 1: seasonTypes → categories → events (has stats, needs meta from eventsMap)
     const seasonTypes = Array.isArray(raw.seasonTypes) ? raw.seasonTypes : [];
     for (const st of seasonTypes) {
       const categories = Array.isArray(st?.categories) ? st.categories : [];
@@ -261,37 +270,38 @@ class NBAAdapter extends BaseAdapter {
         if (cat?.type && cat.type !== 'event') continue;
         const events = Array.isArray(cat?.events) ? cat.events : [];
         for (const event of events) {
-          const row = this._eventToRowNBA(event, names);
-          if (row) rows.push(row);
+          const meta = eventsMap[event.eventId] || {};
+          const row = this._eventToRowNBA({ ...meta, ...event }, labels);
+          if (row) {
+            seenIds.add(row.eventId);
+            rows.push(row);
+          }
         }
       }
     }
-    if (rows.length > 0) return rows;
 
-    // Path 2: flat events map
-    const eventsMap = raw.events && typeof raw.events === 'object' && !Array.isArray(raw.events)
-      ? raw.events
-      : null;
-    if (eventsMap) {
-      for (const event of Object.values(eventsMap)) {
-        const row = this._eventToRowNBA(event, names);
-        if (row) rows.push(row);
-      }
+    // Path 2: any event in the top-level map not already accounted for
+    // (shouldn't normally happen for NBA, but keeps parity with NFL).
+    for (const event of Object.values(eventsMap)) {
+      const id = event?.eventId || event?.id;
+      if (id && seenIds.has(id)) continue;
+      if (!Array.isArray(event?.stats) || event.stats.length === 0) continue;
+      const row = this._eventToRowNBA(event, labels);
+      if (row) rows.push(row);
     }
     return rows;
   }
 
-  _eventToRowNBA(event, names) {
+  _eventToRowNBA(event, labels) {
     if (!event) return null;
     const statValues = Array.isArray(event.stats) ? event.stats : [];
     if (statValues.length === 0) return null;
 
-    // ESPN NBA gamelog stat name mapping (labels seen in the wild):
-    //   MIN, FG, FG%, 3PT, 3P%, FT, FT%, OR, DR, REB, AST, STL, BLK, TO, PF, +/-, PTS
-    // FG comes as a "MADE-ATT" string like "8-15"; same for 3PT and FT.
+    // Zip by labels — index i in stats[] corresponds to labels[i]
+    // (e.g. MIN, FG, FG%, 3PT, 3P%, FT, FT%, REB, AST, BLK, STL, PF, TO, PTS).
     const raw = {};
-    for (let i = 0; i < names.length && i < statValues.length; i += 1) {
-      raw[names[i]] = statValues[i];
+    for (let i = 0; i < labels.length && i < statValues.length; i += 1) {
+      raw[labels[i]] = statValues[i];
     }
 
     const parseMadeAtt = (s) => {
@@ -310,9 +320,11 @@ class NBAAdapter extends BaseAdapter {
 
     return {
       eventId:  event.eventId || event.id || null,
-      date:     event.gameDate || event.date || null,
+      // Meta comes from the top-level `events` map lookup in the parser.
+      date:     event.gameDate || event.gameDateTime || event.date || null,
       opponent: event.opponent?.abbreviation || event.opponent?.displayName || null,
-      homeAway: event.homeAwaySymbol || (event.atVs === '@' || event.atVs === 'at' ? 'away' : 'home'),
+      homeAway: event.homeAwaySymbol
+                || (event.atVs === '@' || event.atVs === 'at' ? 'away' : 'home'),
 
       // Fields matching NBAFormulas sum()
       points:     num(raw.PTS),
@@ -323,8 +335,6 @@ class NBAAdapter extends BaseAdapter {
       tpm:        tpt.made,
       tpa:        tpt.att,
       totReb:     num(raw.REB),
-      offReb:     num(raw.OR),
-      defReb:     num(raw.DR),
       assists:    num(raw.AST),
       turnovers:  num(raw.TO),
       steals:     num(raw.STL),
