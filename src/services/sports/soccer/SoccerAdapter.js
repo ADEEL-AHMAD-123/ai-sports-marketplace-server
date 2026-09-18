@@ -250,7 +250,22 @@ class SoccerAdapter extends BaseAdapter {
     const marketKey = Object.entries(MARKET_MAP).find(([, v]) => v === statType)?.[0];
     if (!marketKey) return { line: null, isAvailable: false };
 
-    const props = await this.fetchProps(oddsEventId, { markets: marketKey });
+    // Look up the game's actual league from the DB — otherwise fetchProps
+    // defaults to 'soccer_epl' and 404s for Bundesliga/La Liga/Serie A/etc.
+    // events. This is the reason pre-flight was failing for Bayern, Real
+    // Madrid, Milan, etc. props with "This prop is no longer available."
+    const Game = require('../../../models/Game.model').Game;
+    const gameDoc = await Game.findOne({ sport: 'soccer', oddsEventId })
+      .select('leagueId')
+      .lean();
+
+    let oddsSportKey = null;
+    if (gameDoc?.leagueId) {
+      const cfg = Object.values(SOCCER_LEAGUES).find((c) => c.apiSportsId === Number(gameDoc.leagueId));
+      if (cfg) oddsSportKey = cfg.oddsSportKey;
+    }
+
+    const props = await this.fetchProps(oddsEventId, { markets: marketKey, oddsSportKey });
     const norm = this._normName(playerName);
     const match = props.find((p) => this._normName(p.playerName) === norm && p.statType === statType);
     return match ? { line: match.line, isAvailable: true } : { line: null, isAvailable: false };
