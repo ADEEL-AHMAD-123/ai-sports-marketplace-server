@@ -268,6 +268,8 @@ const insightSchema = new mongoose.Schema(
     formStatAvg:        { type: Number, default: null },
     focusStatAvg:       { type: Number, default: null },
     baselineStatAvg:    { type: Number, default: null },
+    // Raw last-N per-game values for the modal's sparkline chart.
+    recentStatValues:   { type: [Number], default: undefined },
     isPlayoffGame:      { type: Boolean, default: false },
     playoffRound:       { type: String,  default: null },
 

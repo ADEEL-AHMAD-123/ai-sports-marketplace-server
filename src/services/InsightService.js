@@ -496,6 +496,12 @@ class InsightService {
         return q;
       })(),
       insightText:       aiResponse.text,
+      // Raw last-N per-game values powering the modal's sparkline chart.
+      // Kept as a small numeric array (usually 5-10 values); safe to store
+      // and forward to the client alongside the aggregate averages.
+      recentStatValues:  Array.isArray(processedStats?.recentStatValues)
+                          ? processedStats.recentStatValues
+                          : null,
       // Stat fields for InsightModal panels — saved flat so frontend reads directly
       // NBA fields
       formPoints:         processedStats?.formPoints        ?? null,

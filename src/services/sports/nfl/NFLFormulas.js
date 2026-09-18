@@ -128,8 +128,12 @@ const buildNFLPrompt = ({
         `- ${teamContext.awayTeamName || 'Away'} recent: ${teamContext.awayForm?.pointsForPerGame ?? 'n/a'} PF/G, ${teamContext.awayForm?.pointsAgainstPerGame ?? 'n/a'} PA/G (${teamContext.awayForm?.games ?? 0}g)`,
         `- Rest days: home ${teamContext.homeRestDays ?? 'n/a'} | away ${teamContext.awayRestDays ?? 'n/a'} | edge ${teamContext.restEdgeDays ?? 'n/a'}`,
         `- Short rest flag: ${teamContext.hasShortRest ? 'yes' : 'no'}`,
+        // Explicit disclosure: matchup context is TEAM-LEVEL only. The AI
+        // must NOT invent per-position stats (e.g. "opponent allows X
+        // receiving yards to WRs/g") because none are supplied.
+        '- Only overall points-for/points-against are supplied. NO per-position or per-stat defensive splits are available.',
       ].join('\n')
-    : null;
+    : 'MATCHUP CONTEXT\n- None supplied. Do not reference opponent form, defense, or rankings.';
 
   return [
     'Analyze this NFL player prop and decide OVER or UNDER.',

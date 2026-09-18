@@ -230,16 +230,33 @@ class StrategyService {
 
     await this._flushBulkOps(updateOps);
 
+    const noStatsPct = props.length > 0 ? Math.round((noStats / props.length) * 100) : 0;
     const summary = {
       scored,
       failed,
       noStats,
+      noStatsPct,           // 0-100 — for at-a-glance monitoring
       hcTagged,
       bvTagged,
       hiddenInsufficientGames,
       hiddenNoStats,
       totalConsidered: props.length,
     };
+    // Alarm loudly if a significant chunk of the slate ran without stats.
+    // Silent stats-source failures (ESPN roster miss, API-Sports quota
+    // exhaustion, etc.) would otherwise be buried in the summary log.
+    if (props.length >= 5 && noStatsPct >= 25) {
+      logger.error(
+        `🚨 [StrategyService] HIGH noStats rate for ${sport}: ` +
+        `${noStats}/${props.length} (${noStatsPct}%). Likely stats-source outage.`,
+        summary
+      );
+    } else if (noStatsPct >= 10) {
+      logger.warn(
+        `⚠️  [StrategyService] Elevated noStats for ${sport}: ` +
+        `${noStats}/${props.length} (${noStatsPct}%)`
+      );
+    }
     logger.info(`✅ [StrategyService] Scoring complete for ${sport}`, summary);
     return summary;
   }
